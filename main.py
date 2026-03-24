@@ -51,6 +51,13 @@ class SummaryCollector:
     def has_changes(self) -> bool:
         return any(self.per_course.get(c) for c in self.per_course)
 
+    def get_action_count(self, action: str) -> int:
+        count = 0
+        for folders in self.per_course.values():
+            for items in folders.values():
+                count += sum(1 for _, item_action in items if item_action == action)
+        return count
+
     def print_summary(self):
         print("\n=== Summary of Updates ===")
         if not self.has_changes():
@@ -241,6 +248,7 @@ def get_canvas_quizzes(
     api_key: str,
     timeout: int = 30,
     per_page: int = 100,
+    on_endpoint_unavailable=None,
 ) -> list:
     """
     Fetch quizzes for a given Canvas course using the Quizzes API.
@@ -266,6 +274,13 @@ def get_canvas_quizzes(
             url = next_url
             params = {}  # Only use params on first request
     except requests.RequestException as e:
+        if _is_endpoint_unavailable_error(e):
+            status_code = e.response.status_code if e.response is not None else None
+            print(
+                f"Quizzes endpoint appears unavailable for course {course_id} (HTTP {status_code})."
+            )
+            if on_endpoint_unavailable:
+                on_endpoint_unavailable("EXPORT_QUIZZES", status_code)
         print(f"Error fetching quizzes for course {course_id}: {e}")
         return []
     return quizzes
@@ -413,7 +428,30 @@ def process_canvas_file(
         success = save_file_locally(local_filepath, filename, folder_path)
 
         if success:
-            # Record in summary
+            if filename.lower().endswith(".pdf") and opendataloader_pdf:
+                pdf_path = os.path.join(folder_path, filename)
+                print(f"Extracting '{filename}' using Hybrid Mode...")
+                try:
+                    opendataloader_pdf.convert(
+                        input_path=[pdf_path],
+                        output_dir=folder_path,
+                        format="markdown,json",
+                        hybrid="docling-fast",
+                        hybrid_fallback=True,
+                        quiet=True,
+                    )
+                except Exception as e:
+                    if summary and course_name and dest_label:
+                        summary.add_file(
+                            course_name,
+                            dest_label,
+                            filename,
+                            "failed_extraction",
+                        )
+                    print(f"  -> Error extracting {filename}: {e}")
+                    return 0
+
+            # Record in summary only after optional extraction succeeds
             if summary and course_name and dest_label:
                 summary.add_file(
                     course_name,
@@ -421,21 +459,6 @@ def process_canvas_file(
                     filename,
                     "updated" if existing_metadata else "created",
                 )
-                if filename.lower().endswith(".pdf"):
-                    if opendataloader_pdf:
-                        pdf_path = os.path.join(folder_path, filename)
-                        print(f"Extracting '{filename}' using Hybrid Mode...")
-                        try:
-                            opendataloader_pdf.convert(
-                                input_path=[pdf_path],
-                                output_dir=folder_path,
-                                format="markdown,json",
-                                hybrid="docling-fast",
-                                hybrid_fallback=True,
-                                quiet=True,
-                            )
-                        except Exception as e:
-                            print(f"  -> Error extracting {filename}: {e}")
             return 1
         else:
             # If save/upload failed, remove the downloaded file
@@ -721,6 +744,33 @@ def _get_bool_config(
         return value in {"1", "true", "yes", "y", "on"}
     except Exception:
         return default
+
+
+def _is_endpoint_unavailable_error(exc: requests.RequestException) -> bool:
+    """Return True when Canvas endpoint is inaccessible for this tenant (403/404)."""
+    response = getattr(exc, "response", None)
+    if response is None:
+        return False
+    return response.status_code in {403, 404}
+
+
+def _persist_export_toggle(
+    config: configparser.ConfigParser,
+    option: str,
+    value: bool,
+    config_path: str = CONFIG_FILE,
+) -> bool:
+    """Persist one export toggle in config.ini without touching unrelated settings."""
+    try:
+        if not config.has_section("EXPORTS"):
+            config.add_section("EXPORTS")
+        config.set("EXPORTS", option, "true" if value else "false")
+        with open(config_path, "w", encoding="utf-8") as configfile:
+            config.write(configfile)
+        return True
+    except OSError as error:
+        print(f"Could not persist {option} in {config_path}: {error}")
+        return False
 
 
 def _get_canvas_page_key(page: Dict[str, Any]) -> Optional[str]:
@@ -1343,20 +1393,42 @@ def process_course_quizzes(
     timeout: int = DEFAULT_REQUEST_TIMEOUT,
     per_page: int = DEFAULT_CANVAS_PER_PAGE,
     summary: Optional[SummaryCollector] = None,
+    on_endpoint_unavailable=None,
 ):
     if session is None:
         session = requests.Session()
 
     base_url = (canvas_api_url or "").rstrip("/")
     quizzes_url = f"{base_url}/api/v1/courses/{course_id}/quizzes"
-    quizzes = get_paginated_canvas_items(
-        quizzes_url,
-        canvas_headers,
-        session,
-        timeout,
-        per_page,
-        suppress_errors=True,
-    )
+    quizzes = []
+    params = {"per_page": per_page}
+    try:
+        while quizzes_url:
+            response = session.get(
+                quizzes_url, headers=canvas_headers, params=params, timeout=timeout
+            )
+            response.raise_for_status()
+            data = response.json()
+            if isinstance(data, list):
+                quizzes.extend(data)
+            link = response.headers.get("Link", "")
+            next_url = None
+            for part in link.split(","):
+                if 'rel="next"' in part:
+                    next_url = part[part.find("<") + 1 : part.find(">")]
+                    break
+            quizzes_url = next_url
+            params = {}
+    except requests.RequestException as e:
+        if _is_endpoint_unavailable_error(e):
+            status_code = e.response.status_code if e.response is not None else None
+            print(
+                f"Quizzes report endpoint appears unavailable for course {course_id} (HTTP {status_code})."
+            )
+            if on_endpoint_unavailable:
+                on_endpoint_unavailable("EXPORT_QUIZZES", status_code)
+        return 0
+
     if not quizzes:
         return 0
 
@@ -1548,6 +1620,7 @@ def process_course_analytics_activity(
     session: Optional[requests.Session] = None,
     timeout: int = DEFAULT_REQUEST_TIMEOUT,
     summary: Optional[SummaryCollector] = None,
+    on_endpoint_unavailable=None,
 ):
     if session is None:
         session = requests.Session()
@@ -1559,6 +1632,13 @@ def process_course_analytics_activity(
         resp.raise_for_status()
         analytics_payload = resp.json()
     except requests.RequestException as e:
+        if _is_endpoint_unavailable_error(e):
+            status_code = e.response.status_code if e.response is not None else None
+            print(
+                f"Analytics endpoint appears unavailable for course {course_id} (HTTP {status_code})."
+            )
+            if on_endpoint_unavailable:
+                on_endpoint_unavailable("EXPORT_ANALYTICS_ACTIVITY", status_code)
         print(f"Could not fetch analytics for course {course_id}: {e}")
         return 0
 
@@ -1608,6 +1688,7 @@ def process_course_gradebook_history(
     session: Optional[requests.Session] = None,
     timeout: int = DEFAULT_REQUEST_TIMEOUT,
     summary: Optional[SummaryCollector] = None,
+    on_endpoint_unavailable=None,
 ):
     if session is None:
         session = requests.Session()
@@ -1619,6 +1700,13 @@ def process_course_gradebook_history(
         resp.raise_for_status()
         history_payload = resp.json()
     except requests.RequestException as e:
+        if _is_endpoint_unavailable_error(e):
+            status_code = e.response.status_code if e.response is not None else None
+            print(
+                f"Gradebook history endpoint appears unavailable for course {course_id} (HTTP {status_code})."
+            )
+            if on_endpoint_unavailable:
+                on_endpoint_unavailable("EXPORT_GRADEBOOK_HISTORY", status_code)
         print(f"Could not fetch gradebook history for course {course_id}: {e}")
         return 0
 
@@ -1872,6 +1960,26 @@ def main():
         config, "EXPORTS", "EXPORT_INBOX_CONVERSATIONS", False
     )
 
+    runtime_export_flags = {
+        "EXPORT_QUIZZES": export_quizzes,
+        "EXPORT_ANALYTICS_ACTIVITY": export_analytics,
+        "EXPORT_GRADEBOOK_HISTORY": export_gradebook,
+    }
+    disabled_endpoints_this_run: Dict[str, int] = {}
+
+    def disable_export_after_endpoint_failure(option: str, status_code: Optional[int]):
+        if option in disabled_endpoints_this_run:
+            return
+        runtime_export_flags[option] = False
+        disabled_endpoints_this_run[option] = status_code or 0
+        persisted = _persist_export_toggle(config, option, False)
+        if persisted:
+            print(
+                f"Auto-disabled {option} after HTTP {status_code}. Saved to {CONFIG_FILE}."
+            )
+        else:
+            print(f"Auto-disabled {option} after HTTP {status_code} for this run only.")
+
     # Shared HTTP session with retries and connection pooling
 
     session = requests.Session()
@@ -1936,7 +2044,7 @@ def main():
         print(f"\n--- Processing Course: {course_name} ---")
 
         # --- Process Quizzes ---
-        if export_quizzes:
+        if runtime_export_flags["EXPORT_QUIZZES"]:
             print("Searching for quizzes...")
             quizzes = get_canvas_quizzes(
                 course_id,
@@ -1945,6 +2053,7 @@ def main():
                 canvas_api_key,
                 timeout=request_timeout,
                 per_page=canvas_per_page,
+                on_endpoint_unavailable=disable_export_after_endpoint_failure,
             )
             if quizzes:
                 print(f"Found {len(quizzes)} quizzes in '{course_name}':")
@@ -2115,7 +2224,7 @@ def main():
                 except Exception as e:
                     print(f"Error exporting discussions for '{course_name}': {e}")
 
-            if export_quizzes:
+            if runtime_export_flags["EXPORT_QUIZZES"]:
                 try:
                     new_items_synced += process_course_quizzes(
                         course_id,
@@ -2127,6 +2236,7 @@ def main():
                         timeout=request_timeout,
                         per_page=canvas_per_page,
                         summary=summary,
+                        on_endpoint_unavailable=disable_export_after_endpoint_failure,
                     )
                 except Exception as e:
                     print(f"Error exporting quizzes for '{course_name}': {e}")
@@ -2179,7 +2289,7 @@ def main():
                 except Exception as e:
                     print(f"Error exporting groups for '{course_name}': {e}")
 
-            if export_analytics:
+            if runtime_export_flags["EXPORT_ANALYTICS_ACTIVITY"]:
                 try:
                     new_items_synced += process_course_analytics_activity(
                         course_id,
@@ -2190,11 +2300,12 @@ def main():
                         session=session,
                         timeout=request_timeout,
                         summary=summary,
+                        on_endpoint_unavailable=disable_export_after_endpoint_failure,
                     )
                 except Exception as e:
                     print(f"Error exporting analytics for '{course_name}': {e}")
 
-            if export_gradebook:
+            if runtime_export_flags["EXPORT_GRADEBOOK_HISTORY"]:
                 try:
                     new_items_synced += process_course_gradebook_history(
                         course_id,
@@ -2205,6 +2316,7 @@ def main():
                         session=session,
                         timeout=request_timeout,
                         summary=summary,
+                        on_endpoint_unavailable=disable_export_after_endpoint_failure,
                     )
                 except Exception as e:
                     print(f"Error exporting gradebook history for '{course_name}': {e}")
@@ -2253,6 +2365,16 @@ def main():
     # Extract newly downloaded PDFs to Markdown using opendataloader-pdf
     # Print summary before cleanup
     summary.print_summary()
+    failed_extractions = summary.get_action_count("failed_extraction")
+    if failed_extractions:
+        print(f"Extraction failures: {failed_extractions}")
+    if disabled_endpoints_this_run:
+        print("Auto-disabled endpoints this run:")
+        for option, status in disabled_endpoints_this_run.items():
+            if status:
+                print(f"  - {option} (HTTP {status})")
+            else:
+                print(f"  - {option}")
 
     shutil.rmtree(DOWNLOAD_DIR)
     print("\n--- Sync Complete ---")
