@@ -435,7 +435,7 @@ def process_canvas_file(
                     opendataloader_pdf.convert(
                         input_path=[pdf_path],
                         output_dir=folder_path,
-                        format="markdown,json",
+                        format="markdown",
                         hybrid="docling-fast",
                         hybrid_fallback=True,
                         quiet=True,
