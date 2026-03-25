@@ -383,6 +383,95 @@ def download_canvas_file(
         return False
 
 
+def check_java_environment():
+    """Check if Java is available and verify minimum version (Java 11+).
+
+    Returns:
+        tuple: (is_available: bool, version_info: str, error_message: str or None)
+    """
+    try:
+        # Check if java command exists
+        result = subprocess.run(
+            ["java", "-version"],
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+
+        # Parse version from stderr or stdout (java -version writes to stderr)
+        version_output = result.stderr or result.stdout
+        if not version_output:
+            return False, "", "java -version produced no output"
+
+        # Extract version number (e.g., "11", "17", etc.)
+        version_match = re.search(r'version "([0-9]+)', version_output)
+        if version_match:
+            major_version = int(version_match.group(1))
+            version_info = f"Java {major_version}"
+
+            if major_version < 11:
+                return (
+                    False,
+                    version_info,
+                    f"Java 11 or higher required, found {version_info}",
+                )
+            return True, version_info, None
+
+        return True, "(version unknown)", None
+    except FileNotFoundError:
+        return False, "", "Java command not found. Please install Java 11 or higher."
+    except subprocess.TimeoutExpired:
+        return False, "", "Java version check timed out"
+    except Exception as e:
+        return False, "", f"Error checking Java: {e}"
+
+
+def extract_pdf_with_diagnostics(pdf_path: str, output_dir: str) -> tuple[bool, str]:
+    """Extract PDF to Markdown with enhanced error capture and diagnostics.
+
+    Returns:
+        tuple: (success: bool, error_message: str or empty string)
+    """
+    try:
+        # Attempt extraction using opendataloader_pdf
+        opendataloader_pdf.convert(
+            input_path=[pdf_path],
+            output_dir=output_dir,
+            format="markdown",
+            hybrid="docling-fast",
+            hybrid_fallback=True,
+            quiet=True,
+        )
+        return True, ""
+    except subprocess.CalledProcessError as e:
+        # Capture Java subprocess errors
+        stderr_output = e.stderr if hasattr(e, "stderr") else ""
+        stdout_output = e.stdout if hasattr(e, "stdout") else ""
+        error_lines = []
+
+        if stderr_output:
+            error_lines.append(f"Java stderr: {stderr_output[:500]}")
+        if stdout_output:
+            error_lines.append(f"Java stdout: {stdout_output[:500]}")
+        if e.returncode:
+            error_lines.append(f"Exit code: {e.returncode}")
+
+        error_msg = " | ".join(error_lines) if error_lines else f"Subprocess error: {e}"
+        return False, error_msg
+    except Exception as e:
+        error_msg = str(e)
+
+        # Provide better diagnostics for common errors
+        if "No such file" in error_msg or "cannot find" in error_msg.lower():
+            return False, f"PDF file not found at {pdf_path}: {error_msg}"
+        elif "Permission denied" in error_msg:
+            return False, f"Permission denied reading {pdf_path}: {error_msg}"
+        elif "Java" in error_msg or "opendataloader" in error_msg:
+            return False, f"PDF extraction tool error: {error_msg}"
+
+        return False, f"PDF extraction failed: {error_msg}"
+
+
 # --- Main Sync Logic ---
 
 
@@ -431,16 +520,12 @@ def process_canvas_file(
             if filename.lower().endswith(".pdf") and opendataloader_pdf:
                 pdf_path = os.path.join(folder_path, filename)
                 print(f"Extracting '{filename}' using Hybrid Mode...")
-                try:
-                    opendataloader_pdf.convert(
-                        input_path=[pdf_path],
-                        output_dir=folder_path,
-                        format="markdown",
-                        hybrid="docling-fast",
-                        hybrid_fallback=True,
-                        quiet=True,
-                    )
-                except Exception as e:
+
+                extraction_success, extraction_error = extract_pdf_with_diagnostics(
+                    pdf_path, folder_path
+                )
+
+                if not extraction_success:
                     if summary and course_name and dest_label:
                         summary.add_file(
                             course_name,
@@ -448,8 +533,13 @@ def process_canvas_file(
                             filename,
                             "failed_extraction",
                         )
-                    print(f"  -> Error extracting {filename}: {e}")
-                    return 0
+                    print(f"  -> Error extracting {filename}:")
+                    print(f"     {extraction_error}")
+                    # HALT ON EXTRACTION ERROR per user preference
+                    raise RuntimeError(
+                        f"PDF extraction failed for '{filename}'. Cannot continue sync. "
+                        f"Details: {extraction_error}"
+                    )
 
             # Record in summary only after optional extraction succeeds
             if summary and course_name and dest_label:
@@ -1918,6 +2008,17 @@ def main():
     if os.path.exists(DOWNLOAD_DIR):
         shutil.rmtree(DOWNLOAD_DIR)
     os.makedirs(DOWNLOAD_DIR)
+
+    # Check Java environment for PDF extraction
+    print("\nVerifying PDF extraction environment...")
+    java_available, java_version, java_error = check_java_environment()
+    if java_available:
+        print(f"✓ {java_version} detected")
+    else:
+        print(f"✗ Java environment check failed:")
+        print(f"  {java_error}")
+        print("\nCannot proceed with PDF extraction. Exiting.")
+        return
 
     # Performance tuning from config (optional)
     try:
