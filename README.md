@@ -1,79 +1,170 @@
-# Canvas to Storage Scraper & Sync (Local-Only Branch)
+# Canvas to Local Storage Sync
 
-This branch syncs Canvas LMS content to local storage only.
+Sync content from Canvas LMS to local storage with incremental updates.
+
+This project pulls course content (assignments, pages, files, discussions, and optional JSON reports) from Canvas and stores it in a local folder structure. It is local-storage-only and optimized to skip unchanged resources on repeat runs.
 
 ## Features
 
-- Connects to the Canvas LMS API to fetch courses, modules, pages, assignments, and linked files.
-- Saves all synced content to a local directory while preserving course structure.
-- Uses stable, safe folder names (`Course Name [course_id]`) to avoid collisions.
-- Generates assignment and page PDFs per course.
-- Exports optional JSON reports (announcements, discussions, quizzes, enrollments, calendar events, groups, analytics, gradebook, submissions, inbox conversations).
-- Performs change detection to avoid re-downloading unchanged content.
-- Reuses a shared HTTP session with retries and connection pooling.
+- Interactive course selection (`all`, specific numbers, or `last` selection)
+- Incremental sync with timestamp-based change detection
+- Assignment export to Markdown (including rubric/details)
+- Page export to Markdown (including page body)
+- Discussion export to Markdown plus optional course-level discussion JSON
+- Linked file discovery from assignments/pages/discussions (`/files/{id}` links)
+- PDF handling:
+  - Saves original PDF files
+  - Extracts PDF content to `*_pdf.md` using `opendataloader_pdf`
+- Optional course reports (JSON): announcements, quizzes, enrollments, calendar events, groups, analytics, gradebook history, submissions summary
+- Optional global inbox conversations export (`Conversations/conversations.json`)
+- Endpoint auto-disable for unavailable Canvas APIs (HTTP 403/404), persisted to config
 
-## Folder Structure
+## Requirements
 
-```
-LOCAL_ROOT_DIR/
-├── Course Name [12345]/
-│   ├── Assignments/
-│   ├── Reports/
-│   ├── Direct Module Files...
-│   └── Page Title/... 
-└── Conversations/
-    └── conversations.json
-```
+- Python 3.10+
+- Java 11+ (required at runtime for PDF extraction flow)
+- Canvas API token with access to the courses you want to sync
 
-## Setup
+If Java is missing, the app exits before sync starts.
 
-1. Install dependencies:
+## Installation
 
-```sh
+1. Create/activate a virtual environment (recommended)
+2. Install dependencies:
+
+```powershell
 pip install -r requirements.txt
 ```
 
-2. Copy `config.ini.example` to `config.ini`.
-3. Set your Canvas values in `config.ini`:
-   - `API_URL`
-   - `API_KEY`
-4. In `[STORAGE]`, keep:
-   - `STORAGE_TYPE = local`
-   - `LOCAL_ROOT_DIR = ./canvas_sync` (or your preferred path)
+3. Create your config file from the example and update values:
 
-## Run
+```powershell
+copy config.ini.example config.ini
+```
 
-```sh
+## Configuration
+
+Configure `config.ini`.
+
+### `[CANVAS]`
+
+- `API_URL`: Canvas base URL (example: `https://yourschool.instructure.com`)
+- `API_KEY`: Canvas API token
+
+### `[STORAGE]`
+
+- `STORAGE_TYPE`: must be `local` in this project
+- `LOCAL_ROOT_DIR`: root directory for synced output (example: `./canvas_sync`)
+- `FORCE_REGENERATE_ASSIGNMENTS`: `true/false`; when `true`, assignment Markdown is regenerated even if unchanged
+
+### `[LAST_SELECTION]`
+
+- `COURSE_IDS`: comma-separated course IDs; managed automatically by the app
+
+### `[PERFORMANCE]` (optional)
+
+- `REQUEST_TIMEOUT` (default `20`)
+- `MAX_RETRIES` (default `3`)
+- `BACKOFF_FACTOR` (default `0.5`)
+- `CANVAS_PER_PAGE` (default `100`)
+- `HTTP_POOL_MAXSIZE` (default `20`)
+
+### `[EXPORTS]`
+
+Toggle optional exports with `true/false`:
+
+- `EXPORT_ANNOUNCEMENTS` (default `true`)
+- `EXPORT_DISCUSSIONS` (default `true`)
+- `EXPORT_QUIZZES` (default `true`)
+- `EXPORT_ENROLLMENTS` (default `true`)
+- `EXPORT_CALENDAR_EVENTS` (default `true`)
+- `EXPORT_GROUPS` (default `true`)
+- `EXPORT_ANALYTICS_ACTIVITY` (default `true`)
+- `EXPORT_GRADEBOOK_HISTORY` (default `true`)
+- `EXPORT_SUBMISSIONS_SUMMARY` (default `false`)
+- `EXPORT_INBOX_CONVERSATIONS` (default `false`)
+
+If quizzes/analytics/gradebook endpoints return 403/404, the corresponding export can be auto-disabled and persisted to `config.ini`.
+
+## Usage
+
+Run:
+
+```powershell
 python main.py
 ```
 
-The script will prompt for course selection, sync content, and print a summary of created/updated files.
+You will be prompted to choose courses:
 
-## Performance Tuning
+- Enter numbers like `1,3,5`
+- Enter `all`
+- Enter `last` to reuse previous selection
+- Enter `quit` to exit
 
-Optional `[PERFORMANCE]` keys in `config.ini`:
+At the end of the run, the script prints a summary and waits for Enter before exiting.
 
-- `REQUEST_TIMEOUT`
-- `MAX_RETRIES`
-- `BACKOFF_FACTOR`
-- `CANVAS_PER_PAGE`
-- `HTTP_POOL_MAXSIZE`
+## Output Structure
 
-## Export Toggles
+Under `LOCAL_ROOT_DIR`, each course gets its own folder. Typical layout:
 
-Optional `[EXPORTS]` keys control report generation. Most defaults are enabled; heavier exports such as submissions and inbox can remain disabled unless needed.
-
-## Notes on File Discovery
-
-Many Canvas instances do not expose a complete Files API listing. This script discovers files through module items, assignment descriptions, and page content.
-
-If a file exists in Canvas but is not linked from modules/pages/assignments, it may not be discovered.
-
-## Build Executable
-
-```powershell
-pip install pyinstaller
-pyinstaller CanvasSync.spec
+```text
+canvas_sync/
+  Course Name/
+    Assignments/
+      Assignment A/
+        Assignment A.md
+        linked_file.ext
+    Discussions/
+      Topic Title/
+        Topic Title.md
+        linked_file.ext
+    Reports/
+      announcements.json
+      discussion_topics.json
+      quizzes.json
+      enrollments.json
+      calendar_events.json
+      groups.json
+      analytics_activity.json
+      gradebook_history.json
+      submissions_summary.json
+    Page Title/
+      Page Title.md
+      linked_file.ext
+    SomeFile.pdf
+    SomeFile_pdf.md
+  Conversations/
+    conversations.json
 ```
 
-Generated output is placed under `dist/CanvasSync/`.
+Exact files depend on what exists in Canvas and which exports are enabled.
+
+## Incremental Sync Behavior
+
+The sync is designed to avoid unnecessary writes/downloads:
+
+- Existing local metadata is checked before saving resources
+- Change detection is primarily timestamp-driven (`updated_at` vs local mtime)
+- Linked files discovered multiple times in one run are deduplicated by Canvas file ID
+- If a PDF is unchanged but its extracted `*_pdf.md` is missing, extraction is attempted
+
+Run the tool twice in a row to verify unchanged resources are skipped.
+
+## Troubleshooting
+
+- `401 Unauthorized`
+  - Verify `API_KEY` and `API_URL` in `config.ini`
+- No courses listed
+  - Check token permissions and whether courses are date-restricted
+- `403/404` on optional reports
+  - Some institutions disable specific endpoints; auto-disable may be applied for that export
+- Java check failure at startup
+  - Install Java 11+ and ensure it is on `PATH`
+- Slow sync
+  - Adjust `[PERFORMANCE]` values (`CANVAS_PER_PAGE`, `HTTP_POOL_MAXSIZE`, retries/timeouts)
+
+## Notes
+
+- Storage backends other than local filesystem are not supported in this codebase.
+- A temporary download folder is used during sync and cleaned up at the end.
+- The script starts a background hybrid server process for PDF extraction and stops it on completion.
