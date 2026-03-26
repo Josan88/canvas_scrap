@@ -50,13 +50,7 @@ def save_file_locally(local_path, filename, folder_path):
                 
         shutil.move(local_path, destination_path)
         
-        # Make markdown files read-only to prevent accidental edits
-        if filename.lower().endswith(".md"):
-            try:
-                os.chmod(destination_path, stat.S_IREAD)
-            except OSError:
-                pass
-                
+
         print(f"Saved '{filename}' to local storage: '{folder_path}'")
         return True
     except OSError as error:

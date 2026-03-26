@@ -159,13 +159,6 @@ def extract_pdf_with_diagnostics(pdf_path: str, output_dir: str) -> tuple[bool, 
                     with open(md_path, "w", encoding="utf-8") as f:
                         f.write(updated)
 
-        # Make read-only finally
-        if os.path.exists(md_path):
-            try:
-                import stat
-                os.chmod(md_path, stat.S_IREAD)
-            except OSError:
-                pass
 
         return True, ""
     except subprocess.CalledProcessError as e:
