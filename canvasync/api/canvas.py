@@ -108,56 +108,65 @@ def extract_pdf_with_diagnostics(pdf_path: str, output_dir: str) -> tuple[bool, 
     Returns:
         tuple: (success: bool, error_message: str or empty string)
     """
+    import tempfile
     try:
         pdf_stem = os.path.splitext(os.path.basename(pdf_path))[0]
-        md_path = os.path.join(output_dir, f"{pdf_stem}.md")
+        final_md_name = f"{pdf_stem}_pdf.md"
+        final_md_path = os.path.join(output_dir, final_md_name)
 
         # Make writable before extraction to avoid PermissionError
         import stat
-        if os.path.exists(md_path):
+        if os.path.exists(final_md_path):
             try:
-                os.chmod(md_path, stat.S_IWRITE)
+                os.chmod(final_md_path, stat.S_IWRITE)
             except OSError:
                 pass
 
-        # Attempt extraction using opendataloader_pdf
-        opendataloader_pdf.convert(
-            input_path=[pdf_path],
-            output_dir=output_dir,
-            format="markdown",
-            hybrid="docling-fast",
-            hybrid_mode="full",
-            hybrid_fallback=True,
-            use_struct_tree=True,
-            quiet=True,
-            # image_output="embedded",
-        )
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_pdf_path = os.path.join(temp_dir, os.path.basename(pdf_path))
+            try:
+                shutil.copy2(pdf_path, temp_pdf_path)
+            except Exception as e:
+                 return False, f"Failed to setup temp extraction environment: {e}"
 
-        # Rename the auto-generated "{stem}_images" folder to "images"
-        pdf_stem = os.path.splitext(os.path.basename(pdf_path))[0]
-        old_images_dir = os.path.join(output_dir, f"{pdf_stem}_images")
-        new_images_dir = os.path.join(output_dir, "images")
+            # Attempt extraction using opendataloader_pdf
+            opendataloader_pdf.convert(
+                input_path=[temp_pdf_path],
+                output_dir=temp_dir,
+                format="markdown",
+                hybrid="docling-fast",
+                hybrid_mode="full",
+                hybrid_fallback=True,
+                use_struct_tree=True,
+                quiet=True,
+                # image_output="embedded",
+            )
 
-        if os.path.isdir(old_images_dir):
-            # If "images" dir already exists, merge contents into it
-            if os.path.isdir(new_images_dir):
-                for item in os.listdir(old_images_dir):
-                    src = os.path.join(old_images_dir, item)
-                    dst = os.path.join(new_images_dir, item)
-                    shutil.move(src, dst)
-                shutil.rmtree(old_images_dir)
-            else:
-                os.rename(old_images_dir, new_images_dir)
+            # Move images and generated markdown back to output_dir
+            old_images_dir = os.path.join(temp_dir, f"{pdf_stem}_images")
+            new_images_dir = os.path.join(output_dir, "images")
 
-            # Update image references in the generated markdown file
-            md_path = os.path.join(output_dir, f"{pdf_stem}.md")
-            if os.path.isfile(md_path):
-                with open(md_path, "r", encoding="utf-8") as f:
+            if os.path.isdir(old_images_dir):
+                # If "images" dir already exists, merge contents into it
+                if not os.path.exists(output_dir):
+                    os.makedirs(output_dir)
+                if os.path.isdir(new_images_dir):
+                    for item in os.listdir(old_images_dir):
+                        src = os.path.join(old_images_dir, item)
+                        dst = os.path.join(new_images_dir, item)
+                        shutil.move(src, dst)
+                    shutil.rmtree(old_images_dir)
+                else:
+                    shutil.move(old_images_dir, new_images_dir)
+
+            # Update image references in the generated markdown file and save to final destination
+            temp_md_path = os.path.join(temp_dir, f"{pdf_stem}.md")
+            if os.path.isfile(temp_md_path):
+                with open(temp_md_path, "r", encoding="utf-8") as f:
                     content = f.read()
                 updated = content.replace(f"{pdf_stem}_images/", "images/")
-                if updated != content:
-                    with open(md_path, "w", encoding="utf-8") as f:
-                        f.write(updated)
+                with open(final_md_path, "w", encoding="utf-8") as f:
+                    f.write(updated)
 
 
         return True, ""

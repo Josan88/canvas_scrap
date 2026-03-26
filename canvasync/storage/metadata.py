@@ -38,7 +38,9 @@ def has_file_changed(existing_metadata, canvas_size=None, canvas_updated_at=None
                 existing_time = datetime.datetime.fromisoformat(
                     str(existing_mod).replace("Z", "+00:00")
                 )
-            if canvas_time > existing_time:
+            # If the timestamps differ by more than 2 seconds, either Canvas updated 
+            # or the user edited the file locally. We return True to overwrite.
+            if abs(canvas_time.timestamp() - existing_time.timestamp()) > 2.0:
                 return True
         except (ValueError, TypeError):
             pass  # If parsing fails, assume changed

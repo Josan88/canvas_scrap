@@ -56,3 +56,15 @@ def save_file_locally(local_path, filename, folder_path):
     except OSError as error:
         print(f"An error occurred saving file locally: {error}")
         return False
+
+def set_file_mtime(path, iso_time_str):
+    """Sets the modification time of a file to align with Canvas updated_at."""
+    if not iso_time_str or not os.path.exists(path):
+        return
+    try:
+        import datetime
+        canvas_time = datetime.datetime.fromisoformat(iso_time_str.replace("Z", "+00:00"))
+        ts = canvas_time.timestamp()
+        os.utime(path, (ts, ts))
+    except (ValueError, TypeError, OSError) as e:
+        print(f"Failed to set mtime for {path}: {e}")

@@ -36,6 +36,7 @@ from canvasync.storage.local_fs import (
     get_existing_files_in_local_folder,
     get_or_create_local_folder,
     save_file_locally,
+    set_file_mtime,
 )
 from canvasync.storage.metadata import (
     get_existing_file_metadata_local,
@@ -261,14 +262,12 @@ def process_canvas_file(
     processed_canvas_file_ids[file_id] = os.path.join(folder_path, filename)
 
     is_pdf = filename.lower().endswith(".pdf")
-    # Markdown generated from PDF extraction is the canonical reference artifact.
-    reference_filename = f"{os.path.splitext(filename)[0]}.md" if is_pdf else filename
+    # Always check the actual file's metadata, not the extracted artifact
     existing_metadata = get_existing_file_metadata_local(
-        folder_path, reference_filename
+        folder_path, filename
     )
 
     # Check if file has changed
-    # For PDF-linked files, compare Canvas metadata against extracted Markdown freshness.
     if not has_file_changed(existing_metadata, canvas_updated_at=file_updated_at):
         return 0  # No change
 
@@ -295,6 +294,16 @@ def process_canvas_file(
                     print(f"     {extraction_error}")
                     # Continue syncing despite extraction failure —
                     # the PDF itself is already saved to local storage.
+
+            if file_updated_at:
+                target_path = os.path.join(folder_path, filename)
+                if os.path.exists(target_path):
+                    set_file_mtime(target_path, file_updated_at)
+                if is_pdf:
+                    md_name = f"{os.path.splitext(filename)[0]}_pdf.md"
+                    md_path = os.path.join(folder_path, md_name)
+                    if os.path.exists(md_path):
+                        set_file_mtime(md_path, file_updated_at)
 
             # Record a single summary entry per file
             if summary and course_name and dest_label:
@@ -417,6 +426,8 @@ def process_canvas_assignment(
             )
             if success:
                 new_items_count += 1
+                if updated_at:
+                    set_file_mtime(os.path.join(assignment_storage_path, md_filename), updated_at)
                 if summary and course_name:
                     dest_label = f"{course_name}/Assignments/{assignment_folder_name}"
                     summary.add_file(
@@ -624,6 +635,8 @@ def process_canvas_discussion_topic(
             )
             if success:
                 new_items_count += 1
+                if updated_at:
+                    set_file_mtime(os.path.join(topic_storage_path, md_filename), updated_at)
                 if summary and course_name:
                     dest_label = f"{course_name}/Discussions/{safe_topic_title}"
                     summary.add_file(
@@ -930,6 +943,8 @@ def process_canvas_page(
             )
             if success:
                 new_items_count += 1
+                if updated_at:
+                    set_file_mtime(os.path.join(page_storage_path, md_filename), updated_at)
                 if summary and course_name:
                     dest_label = f"{course_name}/{page_folder_name}"
                     summary.add_file(
