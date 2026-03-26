@@ -27,6 +27,13 @@ class SummaryCollector:
                 count += sum(1 for _, item_action in items if item_action == action)
         return count
 
+    def get_action_count_contains(self, substring: str) -> int:
+        count = 0
+        for folders in self.per_course.values():
+            for items in folders.values():
+                count += sum(1 for _, item_action in items if substring in item_action)
+        return count
+
     def print_summary(self):
         print("\n=== Summary of Updates ===")
         if not self.has_changes():

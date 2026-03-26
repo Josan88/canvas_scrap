@@ -236,13 +236,29 @@ def process_canvas_file(
     file_size = file_info.get("size")
     file_updated_at = file_info.get("updated_at")
 
-    if (
-        not all([file_id, filename, file_download_url])
-        or file_id in processed_canvas_file_ids
-    ):
+    if not all([file_id, filename, file_download_url]):
         return 0
 
-    processed_canvas_file_ids.add(file_id)
+    # If already downloaded in this sync run, copy to the new location
+    if file_id in processed_canvas_file_ids:
+        source_path = processed_canvas_file_ids[file_id]
+        dest_path = os.path.join(folder_path, filename)
+        if (
+            source_path != dest_path
+            and os.path.exists(source_path)
+            and not os.path.exists(dest_path)
+        ):
+            try:
+                shutil.copy2(source_path, dest_path)
+                print(f"Copied '{filename}' to '{folder_path}'")
+                if summary and course_name and dest_label:
+                    summary.add_file(course_name, dest_label, filename, "copied")
+                return 1
+            except Exception as e:
+                print(f"Could not copy file '{filename}': {e}")
+        return 0
+
+    processed_canvas_file_ids[file_id] = os.path.join(folder_path, filename)
 
     is_pdf = filename.lower().endswith(".pdf")
     # Markdown generated from PDF extraction is the canonical reference artifact.
@@ -264,6 +280,7 @@ def process_canvas_file(
         success = save_file_locally(local_filepath, filename, folder_path)
 
         if success:
+            extraction_failed = False
             if is_pdf and opendataloader_pdf:
                 pdf_path = os.path.join(folder_path, filename)
                 print(f"Extracting '{filename}' using Hybrid Mode...")
@@ -273,25 +290,21 @@ def process_canvas_file(
                 )
 
                 if not extraction_success:
-                    if summary and course_name and dest_label:
-                        summary.add_file(
-                            course_name,
-                            dest_label,
-                            filename,
-                            "failed_extraction",
-                        )
+                    extraction_failed = True
                     print(f"  -> Error extracting {filename}:")
                     print(f"     {extraction_error}")
                     # Continue syncing despite extraction failure —
                     # the PDF itself is already saved to local storage.
 
-            # Record in summary only after optional extraction succeeds
+            # Record a single summary entry per file
             if summary and course_name and dest_label:
+                base_action = "updated" if existing_metadata else "created"
+                action = f"{base_action} (extraction failed)" if extraction_failed else base_action
                 summary.add_file(
                     course_name,
                     dest_label,
                     filename,
-                    "updated" if existing_metadata else "created",
+                    action,
                 )
             return 1
         else:
@@ -1061,7 +1074,7 @@ def process_course_discussions(
                     topic,
                     course_id,
                     discussions_folder_path,
-                    set(),
+                    {},
                     canvas_api_url,
                     canvas_headers,
                     session,
@@ -1792,7 +1805,7 @@ def main():
         # Prepare per-course reports folder for aggregated exports
         reports_folder_path = get_or_create_local_folder(course_storage_path, "Reports")
 
-        processed_canvas_file_ids = set()
+        processed_canvas_file_ids = {}
         processed_canvas_page_keys = set()
         new_items_synced = 0
 
@@ -2085,7 +2098,7 @@ def main():
     # Extract newly downloaded PDFs to Markdown using opendataloader-pdf
     # Print summary before cleanup
     summary.print_summary()
-    failed_extractions = summary.get_action_count("failed_extraction")
+    failed_extractions = summary.get_action_count_contains("extraction failed")
     if failed_extractions:
         print(f"Extraction failures: {failed_extractions}")
     if disabled_endpoints_this_run:
