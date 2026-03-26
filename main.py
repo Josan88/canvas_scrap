@@ -6,125 +6,54 @@ import requests
 import configparser
 import shutil
 import re
-from typing import Optional, Dict, List, DefaultDict, Any, Set
-from collections import defaultdict
+from typing import Optional, Dict, List, Any, Set
 from urllib.parse import urlparse, unquote
 from bs4 import BeautifulSoup
 from bs4.element import Tag, NavigableString
-import datetime
 
 import opendataloader_pdf
 import html
 import json
 from urllib3.util.retry import Retry
 from requests.adapters import HTTPAdapter
-
-
-# --- Configuration ---
-CONFIG_FILE = "config.ini"
-DOWNLOAD_DIR = "temp_canvas_downloads"
-
-# Performance tuning defaults (overridable via config.ini [PERFORMANCE])
-DEFAULT_REQUEST_TIMEOUT = 20  # seconds
-DEFAULT_MAX_RETRIES = 3
-DEFAULT_BACKOFF_FACTOR = 0.5
-DEFAULT_CANVAS_PER_PAGE = 100
-DEFAULT_HTTP_POOL_MAXSIZE = 20
+from canvasync.api.canvas import (
+    check_java_environment,
+    download_canvas_file,
+    extract_pdf_with_diagnostics,
+    get_paginated_canvas_items,
+)
+from canvasync.config import (
+    CONFIG_FILE,
+    DEFAULT_BACKOFF_FACTOR,
+    DEFAULT_CANVAS_PER_PAGE,
+    DEFAULT_HTTP_POOL_MAXSIZE,
+    DEFAULT_MAX_RETRIES,
+    DEFAULT_REQUEST_TIMEOUT,
+    DOWNLOAD_DIR,
+)
+from canvasync.state import SummaryCollector
+from canvasync.storage.local_fs import (
+    get_existing_files_in_local_folder,
+    get_or_create_local_folder,
+    save_file_locally,
+)
+from canvasync.storage.metadata import (
+    get_existing_file_metadata_local,
+    has_file_changed,
+)
+from canvasync.utils.config_helpers import (
+    _get_bool_config,
+    _is_endpoint_unavailable_error,
+    _persist_export_toggle,
+)
+from canvasync.utils.sanitize import sanitize_filename, sanitize_folder_name
+from canvasync.utils.timestamps import (
+    _max_timestamp_from_items,
+    _should_regenerate_resource,
+)
 
 
 # --- Helper Functions ---
-class SummaryCollector:
-    """Collects a per-course summary of updated/created files grouped by destination folder label."""
-
-    def __init__(self):
-        # Structure: { course_name: { dest_label: [ (filename, action) ] } }
-        self.per_course: Dict[str, DefaultDict[str, List[tuple]]] = {}
-        self.downloaded_pdfs: List[str] = []
-
-    def add_file(self, course_name: str, dest_label: str, filename: str, action: str):
-        if not course_name or not dest_label or not filename:
-            return
-        if course_name not in self.per_course:
-            self.per_course[course_name] = defaultdict(list)
-        self.per_course[course_name][dest_label].append((filename, action))
-
-    def has_changes(self) -> bool:
-        return any(self.per_course.get(c) for c in self.per_course)
-
-    def get_action_count(self, action: str) -> int:
-        count = 0
-        for folders in self.per_course.values():
-            for items in folders.values():
-                count += sum(1 for _, item_action in items if item_action == action)
-        return count
-
-    def print_summary(self):
-        print("\n=== Summary of Updates ===")
-        if not self.has_changes():
-            print("No files or folders were updated across the selected courses.")
-            return
-        for course_name, folders in self.per_course.items():
-            print(f"\nCourse: {course_name}")
-            for dest_label, items in folders.items():
-                print(f"  Folder: {dest_label}")
-                for filename, action in items:
-                    print(f"    - {filename}  [{action}]")
-        print("\n==========================")
-
-
-def sanitize_filename(name):
-    """Removes invalid characters from a string to make it a valid filename, and collapses multiple spaces."""
-    clean_name = re.sub(r'[\\/*?:"<>|]', " ", name).strip()
-    return re.sub(r"\s+", " ", clean_name)
-
-
-def sanitize_folder_name(name: str, fallback: str = "Unnamed") -> str:
-    """Sanitizes folder names and guarantees a non-empty result."""
-    safe_name = sanitize_filename(name or "")
-    return safe_name if safe_name else fallback
-
-
-def get_existing_file_metadata_local(folder_path, filename):
-    """Gets metadata of an existing file in local folder."""
-    if not folder_path or not filename:
-        return None
-    path = os.path.join(folder_path, filename)
-    if os.path.exists(path):
-        try:
-            return {
-                "size": os.path.getsize(path),
-                "modified_time": os.path.getmtime(path),
-            }
-        except OSError as error:
-            print(f"Error getting metadata for '{path}': {error}")
-    return None
-
-
-def has_file_changed(existing_metadata, canvas_size=None, canvas_updated_at=None):
-    """Checks if file has changed based on metadata."""
-    if not existing_metadata:
-        return True  # New file
-    if canvas_size is not None and existing_metadata["size"] != canvas_size:
-        return True
-    if canvas_updated_at and existing_metadata["modified_time"]:
-        try:
-            canvas_time = datetime.datetime.fromisoformat(
-                canvas_updated_at.replace("Z", "+00:00")
-            )
-            existing_mod = existing_metadata["modified_time"]
-            if isinstance(existing_mod, (int, float)):
-                existing_time = datetime.datetime.fromtimestamp(
-                    float(existing_mod), tz=canvas_time.tzinfo
-                )
-            else:
-                existing_time = datetime.datetime.fromisoformat(
-                    str(existing_mod).replace("Z", "+00:00")
-                )
-            if canvas_time > existing_time:
-                return True
-        except (ValueError, TypeError):
-            pass  # If parsing fails, assume changed
-    return False
 
 
 def display_courses_and_get_selection(courses, last_course_ids=None):
@@ -284,192 +213,6 @@ def get_canvas_quizzes(
         print(f"Error fetching quizzes for course {course_id}: {e}")
         return []
     return quizzes
-
-
-# --- Local Storage Functions ---
-
-
-def get_or_create_local_folder(local_root_dir, folder_name, parent_path=None):
-    """Creates a local folder if it doesn't exist. Returns the full path."""
-    folder_name = sanitize_folder_name(folder_name)
-    if parent_path:
-        folder_path = os.path.join(parent_path, folder_name)
-    else:
-        folder_path = os.path.join(local_root_dir, folder_name)
-
-    if not os.path.exists(folder_path):
-        os.makedirs(folder_path)
-        print(f"Created local folder: '{folder_path}'")
-    return folder_path
-
-
-def get_existing_files_in_local_folder(folder_path):
-    """Returns a set of filenames that already exist in a local folder."""
-    if not os.path.exists(folder_path):
-        return set()
-    try:
-        return {
-            f
-            for f in os.listdir(folder_path)
-            if os.path.isfile(os.path.join(folder_path, f))
-        }
-    except OSError as error:
-        print(f"Error reading local folder '{folder_path}': {error}")
-        return set()
-
-
-def save_file_locally(local_path, filename, folder_path):
-    """Moves a file from temp directory to the specified local folder."""
-    if not os.path.exists(local_path):
-        return False
-    try:
-        destination_path = os.path.join(folder_path, filename)
-        shutil.move(local_path, destination_path)
-        print(f"Saved '{filename}' to local storage: '{folder_path}'")
-        return True
-    except OSError as error:
-        print(f"An error occurred saving file locally: {error}")
-        return False
-
-
-def get_paginated_canvas_items(
-    url,
-    headers,
-    session: Optional[requests.Session],
-    timeout: int,
-    per_page: int,
-    suppress_errors: bool = False,
-):
-    """Handles Canvas API pagination to retrieve all items from an endpoint using a shared session, with per_page sizing."""
-    if session is None:
-        session = requests.Session()
-    # Append per_page if not already present
-    if "per_page=" not in url:
-        url += ("&" if "?" in url else "?") + f"per_page={per_page}"
-    items, next_url = [], url
-    while next_url:
-        try:
-            response = session.get(next_url, headers=headers, timeout=timeout)
-            response.raise_for_status()
-            items.extend(response.json())
-            next_url = None
-            if "Link" in response.headers:
-                links = requests.utils.parse_header_links(response.headers["Link"])
-                next_url = next(
-                    (link["url"] for link in links if link.get("rel") == "next"), None
-                )
-        except requests.exceptions.RequestException as e:
-            if not suppress_errors:
-                print(f"Error fetching data from Canvas: {e}")
-            break
-    return items
-
-
-def download_canvas_file(
-    file_url, local_path, headers, session: Optional[requests.Session], timeout: int
-):
-    """Downloads a file from a Canvas URL to a local path."""
-    if session is None:
-        session = requests.Session()
-    try:
-        with session.get(file_url, headers=headers, stream=True, timeout=timeout) as r:
-            r.raise_for_status()
-            with open(local_path, "wb") as f:
-                for chunk in r.iter_content(chunk_size=8192):
-                    f.write(chunk)
-        return True
-    except requests.exceptions.RequestException as e:
-        print(f"Failed to download {file_url}: {e}")
-        return False
-
-
-def check_java_environment():
-    """Check if Java is available and verify minimum version (Java 11+).
-
-    Returns:
-        tuple: (is_available: bool, version_info: str, error_message: str or None)
-    """
-    try:
-        # Check if java command exists
-        result = subprocess.run(
-            ["java", "-version"],
-            capture_output=True,
-            text=True,
-            timeout=5,
-        )
-
-        # Parse version from stderr or stdout (java -version writes to stderr)
-        version_output = result.stderr or result.stdout
-        if not version_output:
-            return False, "", "java -version produced no output"
-
-        # Extract version number (e.g., "11", "17", etc.)
-        version_match = re.search(r'version "([0-9]+)', version_output)
-        if version_match:
-            major_version = int(version_match.group(1))
-            version_info = f"Java {major_version}"
-
-            if major_version < 11:
-                return (
-                    False,
-                    version_info,
-                    f"Java 11 or higher required, found {version_info}",
-                )
-            return True, version_info, None
-
-        return True, "(version unknown)", None
-    except FileNotFoundError:
-        return False, "", "Java command not found. Please install Java 11 or higher."
-    except subprocess.TimeoutExpired:
-        return False, "", "Java version check timed out"
-    except Exception as e:
-        return False, "", f"Error checking Java: {e}"
-
-
-def extract_pdf_with_diagnostics(pdf_path: str, output_dir: str) -> tuple[bool, str]:
-    """Extract PDF to Markdown with enhanced error capture and diagnostics.
-
-    Returns:
-        tuple: (success: bool, error_message: str or empty string)
-    """
-    try:
-        # Attempt extraction using opendataloader_pdf
-        opendataloader_pdf.convert(
-            input_path=[pdf_path],
-            output_dir=output_dir,
-            format="markdown",
-            hybrid="docling-fast",
-            hybrid_fallback=True,
-            quiet=True,
-        )
-        return True, ""
-    except subprocess.CalledProcessError as e:
-        # Capture Java subprocess errors
-        stderr_output = e.stderr if hasattr(e, "stderr") else ""
-        stdout_output = e.stdout if hasattr(e, "stdout") else ""
-        error_lines = []
-
-        if stderr_output:
-            error_lines.append(f"Java stderr: {stderr_output[:500]}")
-        if stdout_output:
-            error_lines.append(f"Java stdout: {stdout_output[:500]}")
-        if e.returncode:
-            error_lines.append(f"Exit code: {e.returncode}")
-
-        error_msg = " | ".join(error_lines) if error_lines else f"Subprocess error: {e}"
-        return False, error_msg
-    except Exception as e:
-        error_msg = str(e)
-
-        # Provide better diagnostics for common errors
-        if "No such file" in error_msg or "cannot find" in error_msg.lower():
-            return False, f"PDF file not found at {pdf_path}: {error_msg}"
-        elif "Permission denied" in error_msg:
-            return False, f"Permission denied reading {pdf_path}: {error_msg}"
-        elif "Java" in error_msg or "opendataloader" in error_msg:
-            return False, f"PDF extraction tool error: {error_msg}"
-
-        return False, f"PDF extraction failed: {error_msg}"
 
 
 # --- Main Sync Logic ---
@@ -705,89 +448,6 @@ def process_canvas_assignment(
     return new_items_count
 
 
-def _parse_iso_utc(dt_str: str):
-    """Parse an ISO 8601 string (potentially with trailing 'Z') into a timezone-aware datetime in UTC.
-
-    Returns None if parsing fails or input is falsy.
-    """
-    if not dt_str or not isinstance(dt_str, str):
-        return None
-    try:
-        from datetime import datetime, timezone
-
-        ds = dt_str.replace("Z", "+00:00")
-        dt = datetime.fromisoformat(ds)
-        # Ensure tz-aware and in UTC
-        if dt.tzinfo is None:
-            return dt.replace(tzinfo=timezone.utc)
-        return dt.astimezone(timezone.utc)
-    except Exception:
-        return None
-
-
-def _to_utc_datetime(value):
-    """Best-effort conversion of various timestamp representations to UTC datetime.
-
-    Supports:
-    - ISO 8601 strings (with or without 'Z')
-    - POSIX timestamps (float/int seconds since epoch)
-    Returns None if conversion fails.
-    """
-    from datetime import datetime, timezone
-
-    if value is None:
-        return None
-    if isinstance(value, (int, float)):
-        try:
-            return datetime.fromtimestamp(float(value), tz=timezone.utc)
-        except Exception:
-            return None
-    if isinstance(value, str):
-        return _parse_iso_utc(value)
-    return None
-
-
-def _max_iso_datetime(values: List[str]):
-    """Return the max ISO timestamp (UTC) from a list of timestamp strings."""
-    try:
-        from datetime import timezone
-
-        timestamps = [_parse_iso_utc(v) for v in values if v]
-        timestamps = [t for t in timestamps if t]
-        if not timestamps:
-            return None
-        return max(timestamps).astimezone(timezone.utc).isoformat()
-    except Exception:
-        return None
-
-
-def _max_timestamp_from_items(items: List[Dict], keys: List[str]):
-    """Best-effort extraction of the newest timestamp from a list of dict items."""
-    if not items:
-        return None
-    collected = []
-    for item in items:
-        if not isinstance(item, dict):
-            continue
-        for key in keys:
-            value = item.get(key)
-            if value:
-                collected.append(value)
-    return _max_iso_datetime(collected)
-
-
-def _should_regenerate_resource(existing_metadata, newest_iso: Optional[str]):
-    """Decide whether to regenerate a derived resource based on newest item timestamp."""
-    if not existing_metadata:
-        return True
-    if newest_iso:
-        existing_dt = _to_utc_datetime(existing_metadata.get("modified_time"))
-        newest_dt = _parse_iso_utc(newest_iso)
-        if existing_dt and newest_dt and newest_dt <= existing_dt:
-            return False
-    return True
-
-
 def _export_json_resource(
     data,
     filename: str,
@@ -819,48 +479,6 @@ def _export_json_resource(
                 os.remove(local_json_path)
             except OSError:
                 pass
-
-
-def _get_bool_config(
-    config: configparser.ConfigParser,
-    section: str,
-    option: str,
-    default: bool,
-) -> bool:
-    if not config.has_section(section):
-        return default
-    try:
-        value = config.get(section, option, fallback=str(default)).strip().lower()
-        return value in {"1", "true", "yes", "y", "on"}
-    except Exception:
-        return default
-
-
-def _is_endpoint_unavailable_error(exc: requests.RequestException) -> bool:
-    """Return True when Canvas endpoint is inaccessible for this tenant (403/404)."""
-    response = getattr(exc, "response", None)
-    if response is None:
-        return False
-    return response.status_code in {403, 404}
-
-
-def _persist_export_toggle(
-    config: configparser.ConfigParser,
-    option: str,
-    value: bool,
-    config_path: str = CONFIG_FILE,
-) -> bool:
-    """Persist one export toggle in config.ini without touching unrelated settings."""
-    try:
-        if not config.has_section("EXPORTS"):
-            config.add_section("EXPORTS")
-        config.set("EXPORTS", option, "true" if value else "false")
-        with open(config_path, "w", encoding="utf-8") as configfile:
-            config.write(configfile)
-        return True
-    except OSError as error:
-        print(f"Could not persist {option} in {config_path}: {error}")
-        return False
 
 
 def _get_canvas_page_key(page: Dict[str, Any]) -> Optional[str]:
