@@ -267,10 +267,24 @@ def process_canvas_file(
         folder_path, filename
     )
 
+    md_name = f"{os.path.splitext(filename)[0]}_pdf.md" if is_pdf else None
+    md_path = os.path.join(folder_path, md_name) if md_name else None
+
     # Check if file has changed
     if not has_file_changed(existing_metadata, canvas_updated_at=file_updated_at):
-        return 0  # No change
-
+        if is_pdf and opendataloader_pdf and not os.path.exists(md_path):
+            pdf_local_path = os.path.join(folder_path, filename)
+            # Ensure the PDF actually exists locally before trying to extract
+            if os.path.exists(pdf_local_path):
+                print(f"Generating missing Markdown for '{filename}'...")
+                extraction_success, extraction_error = extract_pdf_with_diagnostics(
+                    pdf_local_path, folder_path
+                )
+                if not extraction_success:
+                    print(f"  -> Error extracting {filename}:\n     {extraction_error}")
+                elif file_updated_at and os.path.exists(md_path):
+                    set_file_mtime(md_path, file_updated_at)
+        return 0  # No change to the Canvas file itself
     print(f"{'Updating' if existing_metadata else 'New'} file found: '{filename}'")
     local_filepath = os.path.join(DOWNLOAD_DIR, filename)
     if download_canvas_file(
