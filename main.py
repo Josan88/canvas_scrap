@@ -299,7 +299,11 @@ def process_canvas_file(
             # Record a single summary entry per file
             if summary and course_name and dest_label:
                 base_action = "updated" if existing_metadata else "created"
-                action = f"{base_action} (extraction failed)" if extraction_failed else base_action
+                action = (
+                    f"{base_action} (extraction failed)"
+                    if extraction_failed
+                    else base_action
+                )
                 summary.add_file(
                     course_name,
                     dest_label,
@@ -2152,7 +2156,13 @@ if __name__ == "__main__":
 
         print("Starting hybrid server in background...")
         server_process = subprocess.Popen(
-            [sys.executable, "-m", "opendataloader_pdf.hybrid_server"],
+            [
+                sys.executable,
+                "-m",
+                "opendataloader_pdf.hybrid_server",
+                "--enrich-formula",
+                "--enrich-picture-description",
+            ],
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
             **kwargs,

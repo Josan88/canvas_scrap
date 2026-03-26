@@ -1,4 +1,6 @@
+import os
 import re
+import shutil
 import subprocess
 from typing import Optional
 
@@ -113,9 +115,39 @@ def extract_pdf_with_diagnostics(pdf_path: str, output_dir: str) -> tuple[bool, 
             output_dir=output_dir,
             format="markdown",
             hybrid="docling-fast",
+            hybrid_mode="full",
             hybrid_fallback=True,
+            use_struct_tree=True,
             quiet=True,
+            # image_output="embedded",
         )
+
+        # Rename the auto-generated "{stem}_images" folder to "images"
+        pdf_stem = os.path.splitext(os.path.basename(pdf_path))[0]
+        old_images_dir = os.path.join(output_dir, f"{pdf_stem}_images")
+        new_images_dir = os.path.join(output_dir, "images")
+
+        if os.path.isdir(old_images_dir):
+            # If "images" dir already exists, merge contents into it
+            if os.path.isdir(new_images_dir):
+                for item in os.listdir(old_images_dir):
+                    src = os.path.join(old_images_dir, item)
+                    dst = os.path.join(new_images_dir, item)
+                    shutil.move(src, dst)
+                shutil.rmtree(old_images_dir)
+            else:
+                os.rename(old_images_dir, new_images_dir)
+
+            # Update image references in the generated markdown file
+            md_path = os.path.join(output_dir, f"{pdf_stem}.md")
+            if os.path.isfile(md_path):
+                with open(md_path, "r", encoding="utf-8") as f:
+                    content = f.read()
+                updated = content.replace(f"{pdf_stem}_images/", "images/")
+                if updated != content:
+                    with open(md_path, "w", encoding="utf-8") as f:
+                        f.write(updated)
+
         return True, ""
     except subprocess.CalledProcessError as e:
         # Capture Java subprocess errors
