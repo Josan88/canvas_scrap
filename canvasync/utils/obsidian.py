@@ -18,21 +18,25 @@ _INTERNAL_PATH_RE = re.compile(
 )
 
 
-def html_to_obsidian(html_content: str) -> str:
+def html_to_obsidian(html_content: str, file_id_map: dict = None) -> str:
     """Convert Canvas HTML to Obsidian Markdown with ``[[wikilinks]]``.
 
     1. Internal Canvas links (pages, assignments, discussions, quizzes,
-       modules) are replaced with ``[[Sanitised Title]]`` wikilinks.
+       modules, files) are replaced with ``[[Sanitised Title]]`` wikilinks.
     2. All remaining HTML is converted to clean Markdown via *markdownify*.
 
     Args:
         html_content: Raw HTML string from the Canvas API.
+        file_id_map: Optional mapping of file_id -> filename.
 
     Returns:
         Obsidian-ready Markdown string.
     """
     if not html_content:
         return ""
+
+    if file_id_map is None:
+        file_id_map = {}
 
     soup = BeautifulSoup(html_content, "html.parser")
 
@@ -47,6 +51,17 @@ def html_to_obsidian(html_content: str) -> str:
 
         # Prefer the visible link text; fall back to the URL slug.
         link_text = anchor.get_text(strip=True)
+
+        # Check if it's a file link by ID and if we have a mapped filename
+        is_file_link = "/files/" in href.lower()
+        if is_file_link:
+            file_id_match = re.search(r"/files/(\d+)", href)
+            if file_id_match:
+                file_id = file_id_match.group(1)
+                if file_id in file_id_map:
+                    # Target the actual downloaded filename!
+                    link_text = file_id_map[file_id]
+
         if not link_text:
             link_text = unquote(match.group(1)).replace("-", " ")
 

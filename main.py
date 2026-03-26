@@ -379,11 +379,45 @@ def process_canvas_assignment(
         assignment_storage_path, md_filename
     )
 
+    # Scan the assignment description for linked files
+    file_id_map = {}
+    if description:
+        soup_files = BeautifulSoup(description, "html.parser")
+        for link in soup_files.find_all("a", href=True):
+            href = link.get("href", "")
+            match = re.search(r"/files/(\d+)", href)
+            if match:
+                file_id = match.group(1)
+                file_api_url = f"{canvas_api_url}/api/v1/files/{file_id}"
+                try:
+                    file_info_resp = session.get(
+                        file_api_url, headers=canvas_headers, timeout=timeout
+                    )
+                    file_info_resp.raise_for_status()
+                    file_data = file_info_resp.json()
+                    filename_from_api = file_data.get("display_name")
+                    if filename_from_api:
+                        # Pre-process the file to ensure it's downloaded/mapped
+                        process_canvas_file(
+                            file_data,
+                            assignment_storage_path,
+                            processed_canvas_file_ids,
+                            canvas_headers,
+                            session=session,
+                            timeout=timeout,
+                            summary=summary,
+                            course_name=course_name,
+                            dest_label=f"{course_name}/Assignments/{assignment_folder_name}",
+                        )
+                        # Map ID to actual filename for wikilinks
+                        file_id_map[file_id] = filename_from_api
+                except Exception as e:
+                    print(f"Could not pre-fetch file {file_id} for assignment: {e}")
+
     # Check if assignment has changed (or force regeneration via config)
     if not force_regen_assignments and not has_file_changed(
         existing_metadata, canvas_updated_at=updated_at
     ):
-        # Still need to process linked files, but skip generation
         pass
     else:
         print(
@@ -424,7 +458,7 @@ def process_canvas_assignment(
                 md_lines.append("---")
 
             if description:
-                md_lines.append(html_to_obsidian(description))
+                md_lines.append(html_to_obsidian(description, file_id_map=file_id_map))
 
             with open(local_md_path, "w", encoding="utf-8") as out:
                 out.write("\n".join(md_lines))
@@ -449,40 +483,7 @@ def process_canvas_assignment(
         except Exception as e:
             print(f"Could not save assignment '{assignment_name}' as Markdown: {e}")
 
-    # Avoid listing entire folder contents to reduce API calls; rely on per-file metadata checks.
 
-    # Scan the assignment description for linked files
-    if description:
-        soup = BeautifulSoup(description, "html.parser")
-        for link in soup.find_all("a", href=True):
-            if not isinstance(link, Tag):
-                continue
-            href = link.get("href", "")
-            if not isinstance(href, str):
-                continue
-            match = re.search(r"/files/(\d+)", href)
-            if match:
-                file_id = match.group(1)
-                file_api_url = f"{canvas_api_url}/api/v1/files/{file_id}"
-                try:
-                    file_info_resp = session.get(
-                        file_api_url, headers=canvas_headers, timeout=timeout
-                    )
-                    file_info_resp.raise_for_status()
-                    if file_info_resp.ok:
-                        new_items_count += process_canvas_file(
-                            file_info_resp.json(),
-                            assignment_storage_path,
-                            processed_canvas_file_ids,
-                            canvas_headers,
-                            session=session,
-                            timeout=timeout,
-                            summary=summary,
-                            course_name=course_name,
-                            dest_label=f"{course_name}/Assignments/{assignment_folder_name}",
-                        )
-                except requests.RequestException as e:
-                    print(f"Could not fetch file link from assignment: {e}")
 
     return new_items_count
 
@@ -608,6 +609,49 @@ def process_canvas_discussion_topic(
         entries_url, canvas_headers, session, timeout, 100, suppress_errors=True
     )
 
+    # Pre-process linked files to build a mapping for wikilinks
+    file_id_map = {}
+    
+    def pre_process_files(html_content, label):
+        if not html_content:
+            return
+        soup_f = BeautifulSoup(html_content, "html.parser")
+        for link in soup_f.find_all("a", href=True):
+            href = link.get("href", "")
+            match = re.search(r"/files/(\d+)", href)
+            if match:
+                fid = match.group(1)
+                if int(fid) in processed_canvas_file_ids:
+                    # Already processed, just extract name from path if possible or re-fetch
+                    pass 
+                
+                f_url = f"{canvas_api_url}/api/v1/files/{fid}"
+                try:
+                    f_resp = session.get(f_url, headers=canvas_headers, timeout=timeout)
+                    f_resp.raise_for_status()
+                    f_data = f_resp.json()
+                    fname = f_data.get("display_name")
+                    if fname:
+                        process_canvas_file(
+                            f_data,
+                            topic_storage_path,
+                            processed_canvas_file_ids,
+                            canvas_headers,
+                            session=session,
+                            timeout=timeout,
+                            summary=summary,
+                            course_name=course_name,
+                            dest_label=f"{course_name}/Discussions/{label}",
+                        )
+                        file_id_map[fid] = fname
+                except Exception:
+                    pass
+
+    pre_process_files(message, safe_topic_title)
+    if entries:
+        for entry in entries:
+            pre_process_files(entry.get("message"), safe_topic_title)
+
     if not md_already_exists:
         print(
             f"{'Updating' if existing_metadata else 'New'} discussion topic found: '{topic_title}'"
@@ -622,7 +666,7 @@ def process_canvas_discussion_topic(
                 md_lines.append(f"**Posted:** {posted_at}")
             md_lines.append("\n**Prompt:**\n")
             if message:
-                md_lines.append(html_to_obsidian(message))
+                md_lines.append(html_to_obsidian(message, file_id_map=file_id_map))
 
             md_lines.append("\n---\n\n## Replies\n")
             if entries:
@@ -633,7 +677,7 @@ def process_canvas_discussion_topic(
 
                     md_lines.append(f"### {e_author} - _{e_date}_\\n")
                     if e_message:
-                        md_lines.append(html_to_obsidian(e_message))
+                        md_lines.append(html_to_obsidian(e_message, file_id_map=file_id_map))
                     md_lines.append("\\n")
 
             with open(local_md_path, "w", encoding="utf-8") as out:
@@ -662,65 +706,7 @@ def process_canvas_discussion_topic(
             traceback.print_exc()
             print(f"Could not save discussion '{topic_title}' as Markdown: {e}")
 
-    # Process linked files in the topic prompt and entries
-    def extract_and_process_files(html_content, label):
-        nonlocal new_items_count
-        if not html_content:
-            return
-        soup = BeautifulSoup(html_content, "html.parser")
-        for link in soup.find_all("a", href=True):
-            if not isinstance(link, Tag):
-                continue
-            href = link.get("href", "")
-            if not isinstance(href, str):
-                continue
-            # Look for Canvas file links
-            match = re.search(r"/files/(\d+)", href)
-            if match:
-                file_id_from_link = match.group(1)
-                # Check if we've already handled this file ID in this sync run
-                if int(file_id_from_link) in processed_canvas_file_ids:
-                    continue
-
-                file_api_url = f"{canvas_api_url}/api/v1/files/{file_id_from_link}"
-                try:
-                    file_info_resp = session.get(
-                        file_api_url,
-                        headers=canvas_headers,
-                        timeout=timeout,
-                    )
-                    file_info_resp.raise_for_status()
-                    file_data = file_info_resp.json()
-
-                    added = process_canvas_file(
-                        file_data,
-                        topic_storage_path,
-                        processed_canvas_file_ids,
-                        canvas_headers,
-                        session=session,
-                        timeout=timeout,
-                        summary=summary,
-                        course_name=course_name,
-                        dest_label=f"{course_name}/Discussions/{label}",
-                    )
-                    new_items_count += added
-                except requests.RequestException as e:
-                    print(
-                        f"Could not fetch file link {file_id_from_link} from discussion '{topic_title}': {e}"
-                    )
-                except Exception as e:
-                    print(
-                        f"Error processing file {file_id_from_link} in discussion '{topic_title}': {e}"
-                    )
-
-    # Extract files from topic prompt
-    extract_and_process_files(message, safe_topic_title)
-
-    # Extract files from all entries
-    if entries:
-        for entry in entries:
-            extract_and_process_files(entry.get("message"), safe_topic_title)
-
+    # Files are now pre-processed above
     return new_items_count
 
 
@@ -934,6 +920,37 @@ def process_canvas_page(
 
     existing_metadata = get_existing_file_metadata_local(page_storage_path, md_filename)
 
+    # Pre-process linked files to building a mapping for wikilinks
+    file_id_map = {}
+    if html_body:
+        soup_f = BeautifulSoup(html_body, "html.parser")
+        for link in soup_f.find_all("a", href=True):
+            href = link.get("href", "")
+            match = re.search(r"/files/(\d+)", href)
+            if match:
+                fid = match.group(1)
+                f_url = f"{canvas_api_url}/api/v1/files/{fid}"
+                try:
+                    f_resp = session.get(f_url, headers=canvas_headers, timeout=timeout)
+                    f_resp.raise_for_status()
+                    f_data = f_resp.json()
+                    fname = f_data.get("display_name")
+                    if fname:
+                        process_canvas_file(
+                            f_data,
+                            page_storage_path,
+                            processed_canvas_file_ids,
+                            canvas_headers,
+                            session=session,
+                            timeout=timeout,
+                            summary=summary,
+                            course_name=course_name,
+                            dest_label=f"{course_name}/{page_folder_name}",
+                        )
+                        file_id_map[fid] = fname
+                except Exception as e:
+                    print(f"Could not pre-fetch file {fid} for page '{page_title}': {e}")
+
     if force_regen or has_file_changed(existing_metadata, canvas_updated_at=updated_at):
         print(
             f"{'Updating' if existing_metadata else 'New'} page found: '{page_title}'"
@@ -943,7 +960,7 @@ def process_canvas_page(
             md_lines = []
             md_lines.append(f"# {page_title}\\n")
             if html_body:
-                md_lines.append(html_to_obsidian(html_body))
+                md_lines.append(html_to_obsidian(html_body, file_id_map=file_id_map))
 
             with open(local_md_path, "w", encoding="utf-8") as out:
                 out.write("\n".join(md_lines))
@@ -968,41 +985,7 @@ def process_canvas_page(
         except Exception as e:
             escaped_error = html.escape(str(e), quote=False)
             print(f"Could not save page '{page_title}' as Markdown: {escaped_error}")
-
-    soup = BeautifulSoup(html_body, "html.parser")
-    for link in soup.find_all("a", href=True):
-        if not isinstance(link, Tag):
-            continue
-        href = link.get("href", "")
-        if not isinstance(href, str):
-            continue
-        match = re.search(r"/files/(\d+)", href)
-        if match:
-            file_id_from_page = match.group(1)
-            file_api_url = f"{canvas_api_url}/api/v1/files/{file_id_from_page}"
-            try:
-                file_info_resp = session.get(
-                    file_api_url,
-                    headers=canvas_headers,
-                    timeout=timeout,
-                )
-                file_info_resp.raise_for_status()
-            except requests.RequestException as e:
-                print(f"Could not fetch file link from page '{page_title}': {e}")
-                continue
-
-            new_items_count += process_canvas_file(
-                file_info_resp.json(),
-                page_storage_path,
-                processed_canvas_file_ids,
-                canvas_headers,
-                session=session,
-                timeout=timeout,
-                summary=summary,
-                course_name=course_name,
-                dest_label=f"{course_name}/{page_folder_name}" if course_name else None,
-            )
-
+    # Files are now pre-processed above
     return new_items_count
 
 
