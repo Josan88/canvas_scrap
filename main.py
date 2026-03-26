@@ -244,12 +244,16 @@ def process_canvas_file(
 
     processed_canvas_file_ids.add(file_id)
 
-    existing_metadata = get_existing_file_metadata_local(folder_path, filename)
+    is_pdf = filename.lower().endswith(".pdf")
+    # Markdown generated from PDF extraction is the canonical reference artifact.
+    reference_filename = f"{os.path.splitext(filename)[0]}.md" if is_pdf else filename
+    existing_metadata = get_existing_file_metadata_local(
+        folder_path, reference_filename
+    )
 
     # Check if file has changed
-    if not has_file_changed(
-        existing_metadata, canvas_size=file_size, canvas_updated_at=file_updated_at
-    ):
+    # For PDF-linked files, compare Canvas metadata against extracted Markdown freshness.
+    if not has_file_changed(existing_metadata, canvas_updated_at=file_updated_at):
         return 0  # No change
 
     print(f"{'Updating' if existing_metadata else 'New'} file found: '{filename}'")
@@ -260,7 +264,7 @@ def process_canvas_file(
         success = save_file_locally(local_filepath, filename, folder_path)
 
         if success:
-            if filename.lower().endswith(".pdf") and opendataloader_pdf:
+            if is_pdf and opendataloader_pdf:
                 pdf_path = os.path.join(folder_path, filename)
                 print(f"Extracting '{filename}' using Hybrid Mode...")
 
@@ -278,11 +282,8 @@ def process_canvas_file(
                         )
                     print(f"  -> Error extracting {filename}:")
                     print(f"     {extraction_error}")
-                    # HALT ON EXTRACTION ERROR per user preference
-                    raise RuntimeError(
-                        f"PDF extraction failed for '{filename}'. Cannot continue sync. "
-                        f"Details: {extraction_error}"
-                    )
+                    # Continue syncing despite extraction failure —
+                    # the PDF itself is already saved to local storage.
 
             # Record in summary only after optional extraction succeeds
             if summary and course_name and dest_label:
