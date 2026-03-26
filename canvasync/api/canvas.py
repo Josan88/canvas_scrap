@@ -139,7 +139,6 @@ def extract_pdf_with_diagnostics(pdf_path: str, output_dir: str) -> tuple[bool, 
                 hybrid_fallback=True,
                 use_struct_tree=True,
                 quiet=True,
-                # image_output="embedded",
             )
 
             # Move images and generated markdown back to output_dir
