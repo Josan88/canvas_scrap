@@ -13,6 +13,9 @@ LOCAL_ROOT_DIR = ./canvas_sync
 # Optional: force regenerate assignment PDFs regardless of Canvas updated_at timestamp
 # Use true/false, yes/no, 1/0 (case-insensitive). Default is false.
 FORCE_REGENERATE_ASSIGNMENTS=false
+# Optional: force regenerate ALL local markdown files (Pages, Assignments, Discussions) 
+# regardless of Canvas updated_at timestamp. Use true/false. Default is false.
+FORCE_REGENERATE_ALL=false
 
 [LAST_SELECTION]
 # Last selected course IDs (comma-separated)

@@ -48,6 +48,7 @@ from canvasync.utils.config_helpers import (
     _persist_export_toggle,
 )
 from canvasync.utils.sanitize import sanitize_filename, sanitize_folder_name
+from canvasync.utils.obsidian import html_to_obsidian
 from canvasync.utils.timestamps import (
     _max_timestamp_from_items,
     _should_regenerate_resource,
@@ -391,16 +392,11 @@ def process_canvas_assignment(
         local_md_path = os.path.join(DOWNLOAD_DIR, md_filename)
         try:
             md_lines = []
-            md_lines.append(f"# {assignment_name}\\n")
-            if due_at:
-                md_lines.append(f"**Due:** {due_at}")
-            else:
-                md_lines.append(f"**Due:** N/A")
-
-            if points_possible:
-                md_lines.append(f"**Points:** {points_possible}\\n")
-            else:
-                md_lines.append(f"**Points:** N/A\\n")
+            md_lines.append("---")
+            md_lines.append(f"due: {due_at or 'N/A'}")
+            md_lines.append(f"points: {points_possible or 'N/A'}")
+            md_lines.append("---")
+            md_lines.append(f"\n# {assignment_name}\n")
 
             if rubric and len(rubric) > 0:
                 md_lines.append("## Rubric\\n")
@@ -428,7 +424,7 @@ def process_canvas_assignment(
                 md_lines.append("---")
 
             if description:
-                md_lines.append(description)
+                md_lines.append(html_to_obsidian(description))
 
             with open(local_md_path, "w", encoding="utf-8") as out:
                 out.write("\n".join(md_lines))
@@ -575,6 +571,7 @@ def process_canvas_discussion_topic(
     timeout=20,
     summary=None,
     course_name=None,
+    force_regen=False,
 ):
     """Saves a discussion topic and its entries into a PDF."""
     if session is None:
@@ -602,7 +599,7 @@ def process_canvas_discussion_topic(
         topic_storage_path, md_filename
     )
 
-    md_already_exists = not has_file_changed(
+    md_already_exists = not force_regen and not has_file_changed(
         existing_metadata, canvas_updated_at=updated_at
     )
 
@@ -625,7 +622,7 @@ def process_canvas_discussion_topic(
                 md_lines.append(f"**Posted:** {posted_at}")
             md_lines.append("\n**Prompt:**\n")
             if message:
-                md_lines.append(message)
+                md_lines.append(html_to_obsidian(message))
 
             md_lines.append("\n---\n\n## Replies\n")
             if entries:
@@ -636,7 +633,7 @@ def process_canvas_discussion_topic(
 
                     md_lines.append(f"### {e_author} - _{e_date}_\\n")
                     if e_message:
-                        md_lines.append(e_message)
+                        md_lines.append(html_to_obsidian(e_message))
                     md_lines.append("\\n")
 
             with open(local_md_path, "w", encoding="utf-8") as out:
@@ -903,6 +900,7 @@ def process_canvas_page(
     summary: Optional[SummaryCollector] = None,
     course_name: Optional[str] = None,
     processed_canvas_page_keys: Optional[set] = None,
+    force_regen: bool = False,
 ):
     """Saves a page's details as PDF and downloads linked files from the page body."""
     if session is None:
@@ -936,7 +934,7 @@ def process_canvas_page(
 
     existing_metadata = get_existing_file_metadata_local(page_storage_path, md_filename)
 
-    if has_file_changed(existing_metadata, canvas_updated_at=updated_at):
+    if force_regen or has_file_changed(existing_metadata, canvas_updated_at=updated_at):
         print(
             f"{'Updating' if existing_metadata else 'New'} page found: '{page_title}'"
         )
@@ -945,7 +943,7 @@ def process_canvas_page(
             md_lines = []
             md_lines.append(f"# {page_title}\\n")
             if html_body:
-                md_lines.append(html_body)
+                md_lines.append(html_to_obsidian(html_body))
 
             with open(local_md_path, "w", encoding="utf-8") as out:
                 out.write("\n".join(md_lines))
@@ -1074,6 +1072,7 @@ def process_course_discussions(
     per_page: int = DEFAULT_CANVAS_PER_PAGE,
     summary: Optional[SummaryCollector] = None,
     discussions_folder_path=None,
+    force_regen=False,
 ):
     if session is None:
         session = requests.Session()
@@ -1114,6 +1113,7 @@ def process_course_discussions(
                     timeout,
                     summary,
                     course_name,
+                    force_regen=force_regen,
                 )
             except Exception as e:
                 print(f"Error processing PDF for topic {topic.get('title')}: {e}")
@@ -1650,6 +1650,9 @@ def main():
         force_regen_assignments = config["STORAGE"].get(
             "FORCE_REGENERATE_ASSIGNMENTS", "false"
         ).strip().lower() in {"1", "true", "yes", "y", "on"}
+        force_regen_all = config["STORAGE"].get(
+            "FORCE_REGENERATE_ALL", "false"
+        ).strip().lower() in {"1", "true", "yes", "y", "on"}
 
         if storage_type != "local":
             print(
@@ -1863,7 +1866,7 @@ def main():
                         processed_canvas_file_ids,
                         canvas_api_url,
                         canvas_headers,
-                        force_regen_assignments=force_regen_assignments,
+                        force_regen_assignments=(force_regen_assignments or force_regen_all),
                         session=session,
                         timeout=request_timeout,
                         summary=summary,
@@ -1921,6 +1924,7 @@ def main():
                             summary=summary,
                             course_name=course_name,
                             processed_canvas_page_keys=processed_canvas_page_keys,
+                            force_regen=force_regen_all,
                         )
 
                 except requests.exceptions.RequestException as e:
@@ -1950,6 +1954,7 @@ def main():
                 summary=summary,
                 course_name=course_name,
                 processed_canvas_page_keys=processed_canvas_page_keys,
+                force_regen=force_regen_all,
             )
 
         # --- Course-level reports and exports ---
@@ -1986,6 +1991,7 @@ def main():
                         per_page=canvas_per_page,
                         summary=summary,
                         discussions_folder_path=discussions_folder_path,
+                        force_regen=force_regen_all,
                     )
                 except Exception as e:
                     print(f"Error exporting discussions for '{course_name}': {e}")
