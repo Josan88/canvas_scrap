@@ -109,11 +109,16 @@ def extract_pdf_with_diagnostics(pdf_path: str, output_dir: str) -> tuple[bool, 
         tuple: (success: bool, error_message: str or empty string)
     """
     try:
-        # Extract existing personal notes before overwriting
         pdf_stem = os.path.splitext(os.path.basename(pdf_path))[0]
         md_path = os.path.join(output_dir, f"{pdf_stem}.md")
-        from canvasync.utils.notes import extract_personal_notes, append_personal_notes_to_file
-        existing_notes = extract_personal_notes(md_path)
+
+        # Make writable before extraction to avoid PermissionError
+        import stat
+        if os.path.exists(md_path):
+            try:
+                os.chmod(md_path, stat.S_IWRITE)
+            except OSError:
+                pass
 
         # Attempt extraction using opendataloader_pdf
         opendataloader_pdf.convert(
@@ -154,9 +159,13 @@ def extract_pdf_with_diagnostics(pdf_path: str, output_dir: str) -> tuple[bool, 
                     with open(md_path, "w", encoding="utf-8") as f:
                         f.write(updated)
 
-        # Append existing notes back
-        if existing_notes or os.path.isfile(md_path):
-            append_personal_notes_to_file(md_path, existing_notes)
+        # Make read-only finally
+        if os.path.exists(md_path):
+            try:
+                import stat
+                os.chmod(md_path, stat.S_IREAD)
+            except OSError:
+                pass
 
         return True, ""
     except subprocess.CalledProcessError as e:

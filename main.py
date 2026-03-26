@@ -367,9 +367,6 @@ def process_canvas_assignment(
         )
         local_md_path = os.path.join(DOWNLOAD_DIR, md_filename)
         try:
-            from canvasync.utils.notes import extract_personal_notes, get_personal_notes_section
-            existing_notes = extract_personal_notes(os.path.join(assignment_storage_path, md_filename))
-            
             md_lines = []
             md_lines.append(f"# {assignment_name}\\n")
             if due_at:
@@ -409,8 +406,6 @@ def process_canvas_assignment(
 
             if description:
                 md_lines.append(description)
-
-            md_lines.append(get_personal_notes_section(existing_notes))
 
             with open(local_md_path, "w", encoding="utf-8") as out:
                 out.write("\n".join(md_lines))
@@ -597,9 +592,6 @@ def process_canvas_discussion_topic(
         )
         local_md_path = os.path.join(DOWNLOAD_DIR, md_filename)
         try:
-            from canvasync.utils.notes import extract_personal_notes, get_personal_notes_section
-            existing_notes = extract_personal_notes(os.path.join(topic_storage_path, md_filename))
-            
             md_lines = []
 
             md_lines.append(f"# {topic_title}\\n")
@@ -621,8 +613,6 @@ def process_canvas_discussion_topic(
                     if e_message:
                         md_lines.append(e_message)
                     md_lines.append("\\n")
-
-            md_lines.append(get_personal_notes_section(existing_notes))
 
             with open(local_md_path, "w", encoding="utf-8") as out:
                 out.write("\n".join(md_lines))
@@ -925,15 +915,10 @@ def process_canvas_page(
         )
         local_md_path = os.path.join(DOWNLOAD_DIR, md_filename)
         try:
-            from canvasync.utils.notes import extract_personal_notes, get_personal_notes_section
-            existing_notes = extract_personal_notes(os.path.join(page_storage_path, md_filename))
-            
             md_lines = []
             md_lines.append(f"# {page_title}\\n")
             if html_body:
                 md_lines.append(html_body)
-
-            md_lines.append(get_personal_notes_section(existing_notes))
 
             with open(local_md_path, "w", encoding="utf-8") as out:
                 out.write("\n".join(md_lines))
