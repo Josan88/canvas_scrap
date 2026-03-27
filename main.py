@@ -7,9 +7,8 @@ import configparser
 import shutil
 import re
 from typing import Optional, Dict, List, Any, Set
-from urllib.parse import urlparse, unquote
+from urllib.parse import unquote
 from bs4 import BeautifulSoup
-from bs4.element import Tag, NavigableString
 
 import opendataloader_pdf
 import html
@@ -33,7 +32,6 @@ from canvasync.config import (
 )
 from canvasync.state import SummaryCollector
 from canvasync.storage.local_fs import (
-    get_existing_files_in_local_folder,
     get_or_create_local_folder,
     save_file_locally,
     set_file_mtime,
@@ -235,7 +233,6 @@ def process_canvas_file(
     file_id = file_info.get("id")
     filename = file_info.get("display_name")
     file_download_url = file_info.get("url")
-    file_size = file_info.get("size")
     file_updated_at = file_info.get("updated_at")
 
     if not all([file_id, filename, file_download_url]):
@@ -342,6 +339,69 @@ def process_canvas_file(
     return 0
 
 
+def fetch_new_quiz_items(
+    course_id: int,
+    assignment_id: int,
+    canvas_api_url: str,
+    canvas_headers: dict,
+    session: Optional[requests.Session] = None,
+    timeout: int = DEFAULT_REQUEST_TIMEOUT,
+) -> List[Dict[str, Any]]:
+    """Fetch quiz items for a New Quiz assignment using the New Quizzes API."""
+    if session is None:
+        session = requests.Session()
+
+    # New Quizzes API path: /api/quiz/v1/courses/:course_id/quizzes/:assignment_id/items
+    base_url = (canvas_api_url or "").rstrip("/")
+    items_url = f"{base_url}/api/quiz/v1/courses/{course_id}/quizzes/{assignment_id}/items"
+
+    try:
+        response = session.get(items_url, headers=canvas_headers, timeout=timeout)
+        if response.status_code == 404:
+            # Not a New Quiz or endpoint not supported
+            return []
+        response.raise_for_status()
+        return response.json()
+    except requests.RequestException as e:
+        # Don't print for 403 (unauthorized), it's expected for some students/quizzes
+        if hasattr(e, "response") and e.response is not None and e.response.status_code == 403:
+            pass
+        else:
+            print(f"Warning: Could not fetch New Quiz items for assignment {assignment_id}: {e}")
+        return []
+
+
+def format_quiz_items_to_md(items: List[Dict[str, Any]]) -> str:
+    """Format New Quiz items into Obsidian-ready Markdown."""
+    if not items:
+        return ""
+
+    md_lines = ["\n## Quiz Items\n"]
+    for i, item in enumerate(items, 1):
+        details = item.get("details", {})
+        q_type = details.get("type", "unknown")
+        q_text = details.get("text", "") or details.get("prompt", "") or "(No question text)"
+        q_points = details.get("points", 0)
+
+        clean_text = html_to_obsidian(q_text)
+
+        md_lines.append(f"### Question {i} ({q_points} points)")
+        md_lines.append(f"**Type:** {q_type.replace('_', ' ').title()}")
+        md_lines.append(f"\n{clean_text}\n")
+
+        answers = details.get("answers", [])
+        if answers:
+            md_lines.append("**Options:**")
+            for ans in answers:
+                ans_text = html_to_obsidian(ans.get("text") or ans.get("html") or "(Empty)")
+                weight = ans.get("weight", 0)
+                marker = " [CORRECT]" if weight > 0 else ""
+                md_lines.append(f"- {ans_text}{marker}")
+            md_lines.append("")
+
+    return "\n".join(md_lines)
+
+
 def process_canvas_assignment(
     assignment_info,
     assignments_root_path,
@@ -364,6 +424,38 @@ def process_canvas_assignment(
     points_possible = assignment_info.get("points_possible")
     rubric = assignment_info.get("rubric") or assignment_info.get("rubric_settings")
     updated_at = assignment_info.get("updated_at")
+    submission = assignment_info.get("submission")
+
+    max_updated_at = updated_at
+    if submission:
+        for key in ["submitted_at", "graded_at", "posted_at", "updated_at"]:
+            ts = submission.get(key)
+            if ts and (not max_updated_at or ts > max_updated_at):
+                max_updated_at = ts
+
+    # Detect New Quiz (Quizzes Next)
+    is_new_quiz = False
+    submission_types = assignment_info.get("submission_types") or []
+    if "external_tool" in submission_types and assignment_info.get("is_quiz_assignment"):
+        is_new_quiz = True
+
+    quiz_items_md = ""
+    if is_new_quiz:
+        assignment_id = assignment_info.get("id")
+        course_id_from_info = assignment_info.get("course_id") or assignment_info.get("course_id_from_url")
+        if assignment_id and course_id_from_info:
+            print(f"    -> Detected New Quiz: '{assignment_name}'. Attempting to fetch content...")
+            items = fetch_new_quiz_items(
+                course_id_from_info,
+                assignment_id,
+                canvas_api_url,
+                canvas_headers,
+                session=session,
+                timeout=timeout,
+            )
+            if items:
+                quiz_items_md = format_quiz_items_to_md(items)
+                print(f"       (Extracted {len(items)} questions)")
 
     if not assignment_name:
         return 0
@@ -414,9 +506,28 @@ def process_canvas_assignment(
                 except Exception as e:
                     print(f"Could not pre-fetch file {file_id} for assignment: {e}")
 
+    # Process submission attachments
+    if submission:
+        attachments = submission.get("attachments", [])
+        for attachment in attachments:
+            try:
+                process_canvas_file(
+                    attachment,
+                    assignment_storage_path,
+                    processed_canvas_file_ids,
+                    canvas_headers,
+                    session=session,
+                    timeout=timeout,
+                    summary=summary,
+                    course_name=course_name,
+                    dest_label=f"{course_name}/Assignments/{assignment_folder_name}",
+                )
+            except Exception as e:
+                print(f"Could not process attachment for submission in {assignment_name}: {e}")
+
     # Check if assignment has changed (or force regeneration via config)
     if not force_regen_assignments and not has_file_changed(
-        existing_metadata, canvas_updated_at=updated_at
+        existing_metadata, canvas_updated_at=max_updated_at
     ):
         pass
     else:
@@ -460,6 +571,28 @@ def process_canvas_assignment(
             if description:
                 md_lines.append(html_to_obsidian(description, file_id_map=file_id_map))
 
+            if quiz_items_md:
+                md_lines.append(quiz_items_md)
+
+            if submission:
+                state = submission.get("workflow_state")
+                if state and state != "unsubmitted":
+                    md_lines.append("\n## Submission\n")
+                    md_lines.append(f"**Status:** {state}")
+                    score = submission.get("score")
+                    grade = submission.get("grade")
+                    if score is not None:
+                        md_lines.append(f"\n**Score:** {score}")
+                    if grade is not None and grade != str(score):
+                        md_lines.append(f"\n**Grade:** {grade}")
+                    sub_url = submission.get("url")
+                    if sub_url:
+                        md_lines.append(f"\n**URL:** {sub_url}")
+                    body = submission.get("body")
+                    if body:
+                        md_lines.append("\n**Text:**\n")
+                        md_lines.append(html_to_obsidian(body, file_id_map=file_id_map))
+
             with open(local_md_path, "w", encoding="utf-8") as out:
                 out.write("\n".join(md_lines))
 
@@ -470,8 +603,8 @@ def process_canvas_assignment(
             )
             if success:
                 new_items_count += 1
-                if updated_at:
-                    set_file_mtime(os.path.join(assignment_storage_path, md_filename), updated_at)
+                if max_updated_at:
+                    set_file_mtime(os.path.join(assignment_storage_path, md_filename), max_updated_at)
                 if summary and course_name:
                     dest_label = f"{course_name}/Assignments/{assignment_folder_name}"
                     summary.add_file(
@@ -1831,7 +1964,7 @@ def main():
         # --- Process Assignments ---
         print("Searching for assignments...")
         assignments_url = (
-            f"{canvas_api_url}/api/v1/courses/{course_id}/assignments?include[]=rubric"
+            f"{canvas_api_url}/api/v1/courses/{course_id}/assignments?include[]=rubric&include[]=submission"
         )
         assignments = get_paginated_canvas_items(
             assignments_url, canvas_headers, session, request_timeout, canvas_per_page
