@@ -261,9 +261,7 @@ def process_canvas_file(
 
     is_pdf = filename.lower().endswith(".pdf")
     # Always check the actual file's metadata, not the extracted artifact
-    existing_metadata = get_existing_file_metadata_local(
-        folder_path, filename
-    )
+    existing_metadata = get_existing_file_metadata_local(folder_path, filename)
 
     md_name = f"{os.path.splitext(filename)[0]}_pdf.md" if is_pdf else None
     md_path = os.path.join(folder_path, md_name) if md_name else None
@@ -353,7 +351,9 @@ def fetch_new_quiz_items(
 
     # New Quizzes API path: /api/quiz/v1/courses/:course_id/quizzes/:assignment_id/items
     base_url = (canvas_api_url or "").rstrip("/")
-    items_url = f"{base_url}/api/quiz/v1/courses/{course_id}/quizzes/{assignment_id}/items"
+    items_url = (
+        f"{base_url}/api/quiz/v1/courses/{course_id}/quizzes/{assignment_id}/items"
+    )
 
     try:
         response = session.get(items_url, headers=canvas_headers, timeout=timeout)
@@ -364,10 +364,16 @@ def fetch_new_quiz_items(
         return response.json()
     except requests.RequestException as e:
         # Don't print for 403 (unauthorized), it's expected for some students/quizzes
-        if hasattr(e, "response") and e.response is not None and e.response.status_code == 403:
+        if (
+            hasattr(e, "response")
+            and e.response is not None
+            and e.response.status_code == 403
+        ):
             pass
         else:
-            print(f"Warning: Could not fetch New Quiz items for assignment {assignment_id}: {e}")
+            print(
+                f"Warning: Could not fetch New Quiz items for assignment {assignment_id}: {e}"
+            )
         return []
 
 
@@ -380,7 +386,9 @@ def format_quiz_items_to_md(items: List[Dict[str, Any]]) -> str:
     for i, item in enumerate(items, 1):
         details = item.get("details", {})
         q_type = details.get("type", "unknown")
-        q_text = details.get("text", "") or details.get("prompt", "") or "(No question text)"
+        q_text = (
+            details.get("text", "") or details.get("prompt", "") or "(No question text)"
+        )
         q_points = details.get("points", 0)
 
         clean_text = html_to_obsidian(q_text)
@@ -393,7 +401,9 @@ def format_quiz_items_to_md(items: List[Dict[str, Any]]) -> str:
         if answers:
             md_lines.append("**Options:**")
             for ans in answers:
-                ans_text = html_to_obsidian(ans.get("text") or ans.get("html") or "(Empty)")
+                ans_text = html_to_obsidian(
+                    ans.get("text") or ans.get("html") or "(Empty)"
+                )
                 weight = ans.get("weight", 0)
                 marker = " [CORRECT]" if weight > 0 else ""
                 md_lines.append(f"- {ans_text}{marker}")
@@ -436,15 +446,21 @@ def process_canvas_assignment(
     # Detect New Quiz (Quizzes Next)
     is_new_quiz = False
     submission_types = assignment_info.get("submission_types") or []
-    if "external_tool" in submission_types and assignment_info.get("is_quiz_assignment"):
+    if "external_tool" in submission_types and assignment_info.get(
+        "is_quiz_assignment"
+    ):
         is_new_quiz = True
 
     quiz_items_md = ""
     if is_new_quiz:
         assignment_id = assignment_info.get("id")
-        course_id_from_info = assignment_info.get("course_id") or assignment_info.get("course_id_from_url")
+        course_id_from_info = assignment_info.get("course_id") or assignment_info.get(
+            "course_id_from_url"
+        )
         if assignment_id and course_id_from_info:
-            print(f"    -> Detected New Quiz: '{assignment_name}'. Attempting to fetch content...")
+            print(
+                f"    -> Detected New Quiz: '{assignment_name}'. Attempting to fetch content..."
+            )
             items = fetch_new_quiz_items(
                 course_id_from_info,
                 assignment_id,
@@ -523,7 +539,9 @@ def process_canvas_assignment(
                     dest_label=f"{course_name}/Assignments/{assignment_folder_name}",
                 )
             except Exception as e:
-                print(f"Could not process attachment for submission in {assignment_name}: {e}")
+                print(
+                    f"Could not process attachment for submission in {assignment_name}: {e}"
+                )
 
     # Check if assignment has changed (or force regeneration via config)
     if not force_regen_assignments and not has_file_changed(
@@ -604,7 +622,10 @@ def process_canvas_assignment(
             if success:
                 new_items_count += 1
                 if max_updated_at:
-                    set_file_mtime(os.path.join(assignment_storage_path, md_filename), max_updated_at)
+                    set_file_mtime(
+                        os.path.join(assignment_storage_path, md_filename),
+                        max_updated_at,
+                    )
                 if summary and course_name:
                     dest_label = f"{course_name}/Assignments/{assignment_folder_name}"
                     summary.add_file(
@@ -615,8 +636,6 @@ def process_canvas_assignment(
                     )
         except Exception as e:
             print(f"Could not save assignment '{assignment_name}' as Markdown: {e}")
-
-
 
     return new_items_count
 
@@ -744,7 +763,7 @@ def process_canvas_discussion_topic(
 
     # Pre-process linked files to build a mapping for wikilinks
     file_id_map = {}
-    
+
     def pre_process_files(html_content, label):
         if not html_content:
             return
@@ -756,8 +775,8 @@ def process_canvas_discussion_topic(
                 fid = match.group(1)
                 if int(fid) in processed_canvas_file_ids:
                     # Already processed, just extract name from path if possible or re-fetch
-                    pass 
-                
+                    pass
+
                 f_url = f"{canvas_api_url}/api/v1/files/{fid}"
                 try:
                     f_resp = session.get(f_url, headers=canvas_headers, timeout=timeout)
@@ -810,7 +829,9 @@ def process_canvas_discussion_topic(
 
                     md_lines.append(f"### {e_author} - _{e_date}_\\n")
                     if e_message:
-                        md_lines.append(html_to_obsidian(e_message, file_id_map=file_id_map))
+                        md_lines.append(
+                            html_to_obsidian(e_message, file_id_map=file_id_map)
+                        )
                     md_lines.append("\\n")
 
             with open(local_md_path, "w", encoding="utf-8") as out:
@@ -824,7 +845,9 @@ def process_canvas_discussion_topic(
             if success:
                 new_items_count += 1
                 if updated_at:
-                    set_file_mtime(os.path.join(topic_storage_path, md_filename), updated_at)
+                    set_file_mtime(
+                        os.path.join(topic_storage_path, md_filename), updated_at
+                    )
                 if summary and course_name:
                     dest_label = f"{course_name}/Discussions/{safe_topic_title}"
                     summary.add_file(
@@ -1082,7 +1105,9 @@ def process_canvas_page(
                         )
                         file_id_map[fid] = fname
                 except Exception as e:
-                    print(f"Could not pre-fetch file {fid} for page '{page_title}': {e}")
+                    print(
+                        f"Could not pre-fetch file {fid} for page '{page_title}': {e}"
+                    )
 
     if force_regen or has_file_changed(existing_metadata, canvas_updated_at=updated_at):
         print(
@@ -1106,7 +1131,9 @@ def process_canvas_page(
             if success:
                 new_items_count += 1
                 if updated_at:
-                    set_file_mtime(os.path.join(page_storage_path, md_filename), updated_at)
+                    set_file_mtime(
+                        os.path.join(page_storage_path, md_filename), updated_at
+                    )
                 if summary and course_name:
                     dest_label = f"{course_name}/{page_folder_name}"
                     summary.add_file(
@@ -1253,6 +1280,92 @@ def process_course_discussions(
 
     return json_count + pdf_count
 
+def format_classic_quiz_to_md(quiz: dict, questions: list, submission_data: list, file_id_map: dict = None) -> str:
+    md_lines = []
+    
+    title = quiz.get("title", "Untitled Quiz")
+    description = quiz.get("description", "")
+    points = quiz.get("points_possible", 0)
+    quiz_type = quiz.get("quiz_type", "unknown").replace('_', ' ').title()
+    
+    md_lines.append(f"# {title}\n")
+    md_lines.append(f"**Type:** {quiz_type}")
+    md_lines.append(f"**Points:** {points}\n")
+    
+    if description:
+        md_lines.append(html_to_obsidian(description, file_id_map=file_id_map))
+        md_lines.append("\n---\n")
+    
+    sub_map = {}
+    if submission_data:
+        for s_ans in submission_data:
+            q_id = s_ans.get("question_id")
+            if q_id:
+                sub_map[q_id] = s_ans
+                
+    if not questions:
+        md_lines.append("*No questions found for this quiz.*")
+        return "\n".join(md_lines)
+        
+    for i, q in enumerate(questions, 1):
+        q_id = q.get("id")
+        q_name = q.get("question_name", f"Question {i}")
+        q_points = q.get("points_possible", 0)
+        q_text = q.get("question_text", "")
+        q_type = q.get("question_type", "unknown")
+        
+        md_lines.append(f"### {q_name} ({q_points} points)")
+        md_lines.append(f"**Type:** {q_type.replace('_', ' ').title()}\n")
+        
+        md_lines.append(html_to_obsidian(q_text, file_id_map=file_id_map))
+        md_lines.append("")
+        
+        answers = q.get("answers", [])
+        sub_ans = sub_map.get(q_id, {})
+        
+        if answers:
+            md_lines.append("**Options:**")
+            picked_answer_id = sub_ans.get("answer_id")
+            
+            for ans in answers:
+                ans_id = ans.get("id")
+                ans_text = html_to_obsidian(ans.get("text", "") or ans.get("html", ""))
+                weight = ans.get("weight", 0)
+                
+                markers = []
+                if weight > 0:
+                    markers.append("CORRECT")
+                
+                is_selected = (picked_answer_id is not None and ans_id == picked_answer_id)
+                if is_selected:
+                    markers.append("SELECTED")
+                    
+                marker_str = f" [{', '.join(markers)}]" if markers else ""
+                if is_selected:
+                    md_lines.append(f"- **{ans_text}**{marker_str}")
+                else:
+                    md_lines.append(f"- {ans_text}{marker_str}")
+            md_lines.append("")
+            
+        if q_type in ("essay_question", "short_answer_question", "file_upload_question"):
+            student_text = sub_ans.get("text", "")
+            if student_text:
+                md_lines.append("**Your Answer:**")
+                md_lines.append(html_to_obsidian(student_text, file_id_map=file_id_map))
+                md_lines.append("")
+                
+        if sub_ans:
+            score = sub_ans.get("points", 0)
+            correct = sub_ans.get("correct")
+            if correct is True:
+                status = "Correct"
+            elif correct is False:
+                status = "Incorrect"
+            else:
+                status = "Graded/Unknown"
+            md_lines.append(f"> [!info] Result: {status} ({score} / {q_points} points)\n")
+            
+    return "\n".join(md_lines)
 
 def process_course_quizzes(
     course_id: int,
@@ -1265,6 +1378,8 @@ def process_course_quizzes(
     per_page: int = DEFAULT_CANVAS_PER_PAGE,
     summary: Optional[SummaryCollector] = None,
     on_endpoint_unavailable=None,
+    quizzes_folder_path=None,
+    force_regen=False,
 ):
     if session is None:
         session = requests.Session()
@@ -1309,20 +1424,72 @@ def process_course_quizzes(
         reports_folder_path_or_id, filename
     )
 
-    if not _should_regenerate_resource(existing_metadata, latest_ts):
-        return 0
+    should_regen_json = _should_regenerate_resource(existing_metadata, latest_ts)
 
-    print(f"{'Updating' if existing_metadata else 'New'} quizzes for '{course_name}'")
-    reports_label = f"{course_name}/Reports"
-    return _export_json_resource(
-        quizzes,
-        filename,
-        reports_folder_path_or_id,
-        existing_metadata,
-        summary,
-        course_name,
-        reports_label,
-    )
+    quiz_md_count = 0
+    if quizzes_folder_path and quizzes:
+        for quiz in quizzes:
+            quiz_id = quiz.get("id")
+            if not quiz_id:
+                continue
+            title = quiz.get("title", f"Quiz_{quiz_id}")
+            safe_title = sanitize_filename(title)
+            md_filename = f"{safe_title}.md"
+            q_updated_at = quiz.get("updated_at")
+
+            quiz_storage_path = get_or_create_local_folder(quizzes_folder_path, safe_title)
+            existing_quiz_md = get_existing_file_metadata_local(quiz_storage_path, md_filename)
+
+            if not force_regen and not has_file_changed(existing_quiz_md, canvas_updated_at=q_updated_at):
+                continue
+
+            # Fetch questions
+            questions_url = f"{base_url}/api/v1/courses/{course_id}/quizzes/{quiz_id}/questions"
+            questions = get_paginated_canvas_items(questions_url, canvas_headers, session, timeout, per_page, suppress_errors=True) or []
+
+            # Fetch submissions
+            submissions_url = f"{base_url}/api/v1/courses/{course_id}/quizzes/{quiz_id}/submissions"
+            submission_data = []
+            try:
+                sub_resp = session.get(submissions_url, headers=canvas_headers, timeout=timeout)
+                sub_resp.raise_for_status()
+                sub_json = sub_resp.json()
+                subs = sub_json.get("quiz_submissions", []) if isinstance(sub_json, dict) else (sub_json if isinstance(sub_json, list) else [])
+                if subs:
+                    subs.sort(key=lambda x: x.get("attempt", 0), reverse=True)
+                    submission_data = subs[0].get("submission_data", [])
+            except Exception:
+                pass
+
+            md_content = format_classic_quiz_to_md(quiz, questions, submission_data)
+            local_md_path = os.path.join(DOWNLOAD_DIR, md_filename)
+            try:
+                with open(local_md_path, "w", encoding="utf-8") as f:
+                    f.write(md_content)
+                if save_file_locally(local_md_path, md_filename, quiz_storage_path):
+                    if q_updated_at:
+                        set_file_mtime(os.path.join(quiz_storage_path, md_filename), q_updated_at)
+                    if summary:
+                        summary.add_file(course_name, f"{course_name}/Quizzes/{safe_title}", md_filename, "updated" if existing_quiz_md else "created")
+                    quiz_md_count += 1
+            except Exception as e:
+                print(f"Could not save quiz '{title}' as Markdown: {e}")
+
+    json_count = 0
+    if should_regen_json:
+        print(f"{'Updating' if existing_metadata else 'New'} quizzes JSON for '{course_name}'")
+        reports_label = f"{course_name}/Reports"
+        json_count = _export_json_resource(
+            quizzes,
+            filename,
+            reports_folder_path_or_id,
+            existing_metadata,
+            summary,
+            course_name,
+            reports_label,
+        )
+
+    return json_count + quiz_md_count
 
 
 def process_course_enrollments(
@@ -1963,9 +2130,7 @@ def main():
 
         # --- Process Assignments ---
         print("Searching for assignments...")
-        assignments_url = (
-            f"{canvas_api_url}/api/v1/courses/{course_id}/assignments?include[]=rubric&include[]=submission"
-        )
+        assignments_url = f"{canvas_api_url}/api/v1/courses/{course_id}/assignments?include[]=rubric&include[]=submission"
         assignments = get_paginated_canvas_items(
             assignments_url, canvas_headers, session, request_timeout, canvas_per_page
         )
@@ -1982,7 +2147,9 @@ def main():
                         processed_canvas_file_ids,
                         canvas_api_url,
                         canvas_headers,
-                        force_regen_assignments=(force_regen_assignments or force_regen_all),
+                        force_regen_assignments=(
+                            force_regen_assignments or force_regen_all
+                        ),
                         session=session,
                         timeout=request_timeout,
                         summary=summary,
@@ -2114,6 +2281,7 @@ def main():
 
             if runtime_export_flags["EXPORT_QUIZZES"]:
                 try:
+                    quizzes_folder_path = get_or_create_local_folder(course_storage_path, "Quizzes")
                     new_items_synced += process_course_quizzes(
                         course_id,
                         course_name,
@@ -2124,7 +2292,8 @@ def main():
                         timeout=request_timeout,
                         per_page=canvas_per_page,
                         summary=summary,
-                        on_endpoint_unavailable=disable_export_after_endpoint_failure,
+                        quizzes_folder_path=quizzes_folder_path,
+                        force_regen=force_regen_all,
                     )
                 except Exception as e:
                     print(f"Error exporting quizzes for '{course_name}': {e}")
