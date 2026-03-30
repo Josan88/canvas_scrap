@@ -61,12 +61,15 @@ def html_to_obsidian(html_content: str, file_id_map: dict = None, output_dir: st
             if not os.path.exists(transcript_path):
                 print(f"  - Fetching YouTube transcript for {vid}...")
                 transcript_text = get_youtube_transcript(vid)
-                try:
-                    os.makedirs(output_dir, exist_ok=True)
-                    with open(transcript_path, "w", encoding="utf-8") as tf:
-                        tf.write(f"# YouTube Transcript ({vid})\n\n{transcript_text}\n")
-                except Exception as e:
-                    print(f"  -> Error saving transcript: {e}")
+                if transcript_text.startswith("_") and transcript_text.endswith("_"):
+                    print(f"  -> Skipping transcript file creation: {transcript_text.strip('_')}")
+                else:
+                    try:
+                        os.makedirs(output_dir, exist_ok=True)
+                        with open(transcript_path, "w", encoding="utf-8") as tf:
+                            tf.write(f"# YouTube Transcript ({vid})\n\n{transcript_text}\n")
+                    except Exception as e:
+                        print(f"  -> Error saving transcript: {e}")
                     
         wikilink = f" [[YouTube_Transcript_{vid}]]"
         if tag.name == "iframe":
