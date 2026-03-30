@@ -1,5 +1,6 @@
 """Utility to convert Canvas HTML into Obsidian-flavoured Markdown with wikilinks."""
 
+import os
 import re
 from urllib.parse import unquote
 
@@ -7,6 +8,7 @@ from bs4 import BeautifulSoup, NavigableString
 from markdownify import markdownify as md
 
 from canvasync.utils.sanitize import sanitize_filename
+from canvasync.utils.youtube import extract_youtube_ids, get_youtube_transcript
 
 # Patterns that indicate an internal Canvas resource link.
 # Matches both relative (/courses/...) and absolute (https://...) links.
@@ -18,12 +20,13 @@ _INTERNAL_PATH_RE = re.compile(
 )
 
 
-def html_to_obsidian(html_content: str, file_id_map: dict = None) -> str:
+def html_to_obsidian(html_content: str, file_id_map: dict = None, output_dir: str = None) -> str:
     """Convert Canvas HTML to Obsidian Markdown with ``[[wikilinks]]``.
 
     1. Internal Canvas links (pages, assignments, discussions, quizzes,
        modules, files) are replaced with ``[[Sanitised Title]]`` wikilinks.
-    2. All remaining HTML is converted to clean Markdown via *markdownify*.
+    2. YouTube links and iframes generate transcript wikilinks and write transcript files.
+    3. All remaining HTML is converted to clean Markdown via *markdownify*.
 
     Args:
         html_content: Raw HTML string from the Canvas API.
@@ -39,6 +42,50 @@ def html_to_obsidian(html_content: str, file_id_map: dict = None) -> str:
         file_id_map = {}
 
     soup = BeautifulSoup(html_content, "html.parser")
+
+    # Handle YouTube iframes and links
+    for tag in soup.find_all(["a", "iframe"]):
+        src_or_href = tag.get("href") or tag.get("src") or ""
+        if isinstance(src_or_href, list):
+            src_or_href = src_or_href[0]
+            
+        vids = extract_youtube_ids(src_or_href)
+        if not vids:
+            continue
+            
+        vid = vids[0]
+        # Only fetch if we have an output_dir
+        if output_dir:
+            transcript_filename = f"YouTube_Transcript_{vid}.md"
+            transcript_path = os.path.join(output_dir, transcript_filename)
+            if not os.path.exists(transcript_path):
+                print(f"  - Fetching YouTube transcript for {vid}...")
+                transcript_text = get_youtube_transcript(vid)
+                try:
+                    os.makedirs(output_dir, exist_ok=True)
+                    with open(transcript_path, "w", encoding="utf-8") as tf:
+                        tf.write(f"# YouTube Transcript ({vid})\n\n{transcript_text}\n")
+                except Exception as e:
+                    print(f"  -> Error saving transcript: {e}")
+                    
+        wikilink = f" [[YouTube_Transcript_{vid}]]"
+        if tag.name == "iframe":
+            replacement = soup.new_tag("p")
+            watch_url = f"https://www.youtube.com/watch?v={vid}"
+            a_tag = soup.new_tag("a", href=watch_url)
+            a_tag.string = f"Watch Video ({vid})"
+            replacement.append(a_tag)
+            replacement.append(NavigableString(wikilink))
+            tag.replace_with(replacement)
+        else:
+            # Fix existing anchor tags that might point to embed links
+            if tag.name == "a":
+                watch_url = f"https://www.youtube.com/watch?v={vid}"
+                tag['href'] = watch_url
+
+            # Important: Make sure not to double add if we process twice
+            if wikilink not in tag.get_text():
+                tag.append(NavigableString(wikilink))
 
     for anchor in soup.find_all("a", href=True):
         href = anchor.get("href", "")

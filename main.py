@@ -587,7 +587,7 @@ def process_canvas_assignment(
                 md_lines.append("---")
 
             if description:
-                md_lines.append(html_to_obsidian(description, file_id_map=file_id_map))
+                md_lines.append(html_to_obsidian(description, file_id_map=file_id_map, output_dir=assignment_storage_path))
 
             if quiz_items_md:
                 md_lines.append(quiz_items_md)
@@ -609,7 +609,7 @@ def process_canvas_assignment(
                     body = submission.get("body")
                     if body:
                         md_lines.append("\n**Text:**\n")
-                        md_lines.append(html_to_obsidian(body, file_id_map=file_id_map))
+                        md_lines.append(html_to_obsidian(body, file_id_map=file_id_map, output_dir=assignment_storage_path))
 
             with open(local_md_path, "w", encoding="utf-8") as out:
                 out.write("\n".join(md_lines))
@@ -1118,7 +1118,7 @@ def process_canvas_page(
             md_lines = []
             md_lines.append(f"# {page_title}\\n")
             if html_body:
-                md_lines.append(html_to_obsidian(html_body, file_id_map=file_id_map))
+                md_lines.append(html_to_obsidian(html_body, file_id_map=file_id_map, output_dir=page_storage_path))
 
             with open(local_md_path, "w", encoding="utf-8") as out:
                 out.write("\n".join(md_lines))
@@ -1293,7 +1293,7 @@ def format_classic_quiz_to_md(quiz: dict, questions: list, submission_data: list
     md_lines.append(f"**Points:** {points}\n")
     
     if description:
-        md_lines.append(html_to_obsidian(description, file_id_map=file_id_map))
+        md_lines.append(html_to_obsidian(description, file_id_map=file_id_map, output_dir=None))
         md_lines.append("\n---\n")
     
     sub_map = {}
@@ -1317,7 +1317,7 @@ def format_classic_quiz_to_md(quiz: dict, questions: list, submission_data: list
         md_lines.append(f"### {q_name} ({q_points} points)")
         md_lines.append(f"**Type:** {q_type.replace('_', ' ').title()}\n")
         
-        md_lines.append(html_to_obsidian(q_text, file_id_map=file_id_map))
+        md_lines.append(html_to_obsidian(q_text, file_id_map=file_id_map, output_dir=None))
         md_lines.append("")
         
         answers = q.get("answers", [])
@@ -1329,7 +1329,7 @@ def format_classic_quiz_to_md(quiz: dict, questions: list, submission_data: list
             
             for ans in answers:
                 ans_id = ans.get("id")
-                ans_text = html_to_obsidian(ans.get("text", "") or ans.get("html", ""))
+                ans_text = html_to_obsidian(ans.get("text", "") or ans.get("html", ""), output_dir=None)
                 weight = ans.get("weight", 0)
                 
                 markers = []
@@ -1351,7 +1351,7 @@ def format_classic_quiz_to_md(quiz: dict, questions: list, submission_data: list
             student_text = sub_ans.get("text", "")
             if student_text:
                 md_lines.append("**Your Answer:**")
-                md_lines.append(html_to_obsidian(student_text, file_id_map=file_id_map))
+                md_lines.append(html_to_obsidian(student_text, file_id_map=file_id_map, output_dir=None))
                 md_lines.append("")
                 
         if sub_ans:
