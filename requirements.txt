@@ -3,3 +3,4 @@ beautifulsoup4
 reportlab
 markdownify
 youtube-transcript-api
+opendataloader_pdf

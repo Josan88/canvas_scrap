@@ -51,9 +51,24 @@ from canvasync.utils.timestamps import (
     _max_timestamp_from_items,
     _should_regenerate_resource,
 )
+from canvasync.utils.youtube import extract_youtube_ids
 
 
 # --- Helper Functions ---
+
+
+def needs_transcript_retry(html_content: Optional[str], output_dir: str) -> bool:
+    """Check if any YouTube videos in the HTML content are missing transcript files."""
+    if not html_content or not output_dir:
+        return False
+
+    vids = extract_youtube_ids(html_content)
+    for vid in vids:
+        transcript_filename = f"YouTube_Transcript_{vid}.md"
+        transcript_path = os.path.join(output_dir, transcript_filename)
+        if not os.path.exists(transcript_path):
+            return True
+    return False
 
 
 def display_courses_and_get_selection(courses, last_course_ids=None):
@@ -544,8 +559,16 @@ def process_canvas_assignment(
                 )
 
     # Check if assignment has changed (or force regeneration via config)
-    if not force_regen_assignments and not has_file_changed(
-        existing_metadata, canvas_updated_at=max_updated_at
+    needs_retry = needs_transcript_retry(description, assignment_storage_path)
+    if not needs_retry and submission:
+        needs_retry = needs_transcript_retry(
+            submission.get("body"), assignment_storage_path
+        )
+
+    if (
+        not force_regen_assignments
+        and not needs_retry
+        and not has_file_changed(existing_metadata, canvas_updated_at=max_updated_at)
     ):
         pass
     else:
@@ -752,13 +775,22 @@ def process_canvas_discussion_topic(
         topic_storage_path, md_filename
     )
 
-    md_already_exists = not force_regen and not has_file_changed(
-        existing_metadata, canvas_updated_at=updated_at
-    )
-
     entries_url = f"{canvas_api_url}/api/v1/courses/{course_id}/discussion_topics/{topic_id}/entries"
     entries = get_paginated_canvas_items(
         entries_url, canvas_headers, session, timeout, 100, suppress_errors=True
+    )
+
+    needs_retry = needs_transcript_retry(message, topic_storage_path)
+    if not needs_retry and entries:
+        for entry in entries:
+            if needs_transcript_retry(entry.get("message"), topic_storage_path):
+                needs_retry = True
+                break
+
+    md_already_exists = (
+        not force_regen
+        and not needs_retry
+        and not has_file_changed(existing_metadata, canvas_updated_at=updated_at)
     )
 
     # Pre-process linked files to build a mapping for wikilinks
@@ -773,10 +805,6 @@ def process_canvas_discussion_topic(
             match = re.search(r"/files/(\d+)", href)
             if match:
                 fid = match.group(1)
-                if int(fid) in processed_canvas_file_ids:
-                    # Already processed, just extract name from path if possible or re-fetch
-                    pass
-
                 f_url = f"{canvas_api_url}/api/v1/files/{fid}"
                 try:
                     f_resp = session.get(f_url, headers=canvas_headers, timeout=timeout)
@@ -812,13 +840,19 @@ def process_canvas_discussion_topic(
         try:
             md_lines = []
 
-            md_lines.append(f"# {topic_title}\\n")
+            md_lines.append(f"# {topic_title}\n")
             md_lines.append(f"**Author:** {author}")
             if posted_at:
                 md_lines.append(f"**Posted:** {posted_at}")
             md_lines.append("\n**Prompt:**\n")
             if message:
-                md_lines.append(html_to_obsidian(message, file_id_map=file_id_map))
+                md_lines.append(
+                    html_to_obsidian(
+                        message,
+                        file_id_map=file_id_map,
+                        output_dir=topic_storage_path,
+                    )
+                )
 
             md_lines.append("\n---\n\n## Replies\n")
             if entries:
@@ -827,12 +861,16 @@ def process_canvas_discussion_topic(
                     e_date = entry.get("created_at") or ""
                     e_message = entry.get("message") or ""
 
-                    md_lines.append(f"### {e_author} - _{e_date}_\\n")
+                    md_lines.append(f"### {e_author} - _{e_date}_\n")
                     if e_message:
                         md_lines.append(
-                            html_to_obsidian(e_message, file_id_map=file_id_map)
+                            html_to_obsidian(
+                                e_message,
+                                file_id_map=file_id_map,
+                                output_dir=topic_storage_path,
+                            )
                         )
-                    md_lines.append("\\n")
+                    md_lines.append("\n")
 
             with open(local_md_path, "w", encoding="utf-8") as out:
                 out.write("\n".join(md_lines))
@@ -1109,43 +1147,47 @@ def process_canvas_page(
                         f"Could not pre-fetch file {fid} for page '{page_title}': {e}"
                     )
 
-    if force_regen or has_file_changed(existing_metadata, canvas_updated_at=updated_at):
-        print(
-            f"{'Updating' if existing_metadata else 'New'} page found: '{page_title}'"
-        )
-        local_md_path = os.path.join(DOWNLOAD_DIR, md_filename)
-        try:
-            md_lines = []
-            md_lines.append(f"# {page_title}\\n")
-            if html_body:
-                md_lines.append(html_to_obsidian(html_body, file_id_map=file_id_map, output_dir=page_storage_path))
-
-            with open(local_md_path, "w", encoding="utf-8") as out:
-                out.write("\n".join(md_lines))
-
-            success = save_file_locally(
-                local_md_path,
-                md_filename,
-                page_storage_path,
-            )
-            if success:
-                new_items_count += 1
-                if updated_at:
-                    set_file_mtime(
-                        os.path.join(page_storage_path, md_filename), updated_at
+        if (force_regen or needs_transcript_retry(html_body, page_storage_path) or has_file_changed(existing_metadata, canvas_updated_at=updated_at)):
+            print(f"{'Updating' if existing_metadata else 'New'} page found: '{page_title}'")
+            local_md_path = os.path.join(DOWNLOAD_DIR, md_filename)
+            try:
+                md_lines = []
+                md_lines.append(f"# {page_title}\n")
+                if html_body:
+                    md_lines.append(
+                        html_to_obsidian(
+                            html_body,
+                            file_id_map=file_id_map,
+                            output_dir=page_storage_path,
+                        )
                     )
-                if summary and course_name:
-                    dest_label = f"{course_name}/{page_folder_name}"
-                    summary.add_file(
-                        course_name,
-                        dest_label,
-                        md_filename,
-                        "updated" if existing_metadata else "created",
-                    )
-        except Exception as e:
-            escaped_error = html.escape(str(e), quote=False)
-            print(f"Could not save page '{page_title}' as Markdown: {escaped_error}")
-    # Files are now pre-processed above
+
+                with open(local_md_path, "w", encoding="utf-8") as out:
+                    out.write("\n".join(md_lines))
+
+                success = save_file_locally(
+                    local_md_path,
+                    md_filename,
+                    page_storage_path,
+                )
+                if success:
+                    new_items_count += 1
+                    if updated_at:
+                        set_file_mtime(
+                            os.path.join(page_storage_path, md_filename), updated_at
+                        )
+                    if summary and course_name:
+                        dest_label = f"{course_name}/{page_folder_name}"
+                        summary.add_file(
+                            course_name,
+                            dest_label,
+                            md_filename,
+                            "updated" if existing_metadata else "created",
+                        )
+            except Exception as e:
+                escaped_error = html.escape(str(e), quote=False)
+                print(f"Could not save page '{page_title}' as Markdown: {escaped_error}")
+        # Files are now pre-processed above
     return new_items_count
 
 
@@ -1966,7 +2008,7 @@ def main():
     if java_available:
         print(f"✓ {java_version} detected")
     else:
-        print(f"✗ Java environment check failed:")
+        print("✗ Java environment check failed:")
         print(f"  {java_error}")
         print("\nCannot proceed with PDF extraction. Exiting.")
         return
