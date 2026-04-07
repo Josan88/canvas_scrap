@@ -1642,6 +1642,131 @@ def process_course_calendar_events(
     )
 
 
+def process_course_syllabus(
+    course_id: int,
+    course_name: str,
+    course_storage_path,
+    canvas_api_url: str,
+    canvas_headers: dict,
+    processed_canvas_file_ids: dict,
+    session: Optional[requests.Session] = None,
+    timeout: int = DEFAULT_REQUEST_TIMEOUT,
+    summary: Optional[SummaryCollector] = None,
+    force_regen: bool = False,
+):
+    """Fetch the course syllabus and save as Obsidian Markdown.
+
+    Uses GET /api/v1/courses/:id?include[]=syllabus_body to obtain the
+    syllabus HTML, converts it to Markdown, downloads any linked files,
+    and saves the result.
+    """
+    if session is None:
+        session = requests.Session()
+
+    base_url = (canvas_api_url or "").rstrip("/")
+    syllabus_url = f"{base_url}/api/v1/courses/{course_id}?include[]=syllabus_body"
+
+    try:
+        resp = session.get(syllabus_url, headers=canvas_headers, timeout=timeout)
+        resp.raise_for_status()
+        course_data = resp.json()
+    except requests.RequestException as e:
+        print(f"Could not fetch syllabus for course {course_id}: {e}")
+        return 0
+
+    syllabus_body = course_data.get("syllabus_body")
+    if not syllabus_body or not syllabus_body.strip():
+        return 0
+
+    # Use the course-level updated_at as a proxy for change detection
+    updated_at = course_data.get("updated_at")
+
+    syllabus_folder = get_or_create_local_folder(course_storage_path, "Syllabus")
+    if not syllabus_folder:
+        return 0
+
+    md_filename = "Syllabus.md"
+    existing_metadata = get_existing_file_metadata_local(syllabus_folder, md_filename)
+
+    # Pre-process linked files to build a mapping for wikilinks
+    file_id_map = {}
+    soup_f = BeautifulSoup(syllabus_body, "html.parser")
+    for link in soup_f.find_all("a", href=True):
+        href = link.get("href", "")
+        match = re.search(r"/files/(\d+)", href)
+        if match:
+            fid = match.group(1)
+            f_url = f"{canvas_api_url}/api/v1/files/{fid}"
+            try:
+                f_resp = session.get(f_url, headers=canvas_headers, timeout=timeout)
+                f_resp.raise_for_status()
+                f_data = f_resp.json()
+                fname = f_data.get("display_name")
+                if fname:
+                    process_canvas_file(
+                        f_data,
+                        syllabus_folder,
+                        processed_canvas_file_ids,
+                        canvas_headers,
+                        session=session,
+                        timeout=timeout,
+                        summary=summary,
+                        course_name=course_name,
+                        dest_label=f"{course_name}/Syllabus",
+                    )
+                    file_id_map[fid] = fname
+            except Exception as e:
+                print(f"Could not pre-fetch file {fid} for syllabus: {e}")
+
+    needs_retry = needs_transcript_retry(syllabus_body, syllabus_folder)
+
+    if (
+        not force_regen
+        and not needs_retry
+        and not has_file_changed(existing_metadata, canvas_updated_at=updated_at)
+    ):
+        return 0
+
+    print(
+        f"{'Updating' if existing_metadata else 'New'} syllabus found for '{course_name}'"
+    )
+
+    new_items_count = 0
+    local_md_path = os.path.join(DOWNLOAD_DIR, md_filename)
+    try:
+        md_lines = []
+        md_lines.append(f"# {course_name} \u2014 Syllabus\n")
+        md_lines.append(
+            html_to_obsidian(
+                syllabus_body,
+                file_id_map=file_id_map,
+                output_dir=syllabus_folder,
+            )
+        )
+
+        with open(local_md_path, "w", encoding="utf-8") as out:
+            out.write("\n".join(md_lines))
+
+        success = save_file_locally(local_md_path, md_filename, syllabus_folder)
+        if success:
+            new_items_count += 1
+            if updated_at:
+                set_file_mtime(
+                    os.path.join(syllabus_folder, md_filename), updated_at
+                )
+            if summary and course_name:
+                summary.add_file(
+                    course_name,
+                    f"{course_name}/Syllabus",
+                    md_filename,
+                    "updated" if existing_metadata else "created",
+                )
+    except Exception as e:
+        print(f"Could not save syllabus for '{course_name}' as Markdown: {e}")
+
+    return new_items_count
+
+
 def process_course_groups(
     course_id: int,
     course_name: str,
@@ -2050,6 +2175,9 @@ def main():
     export_submissions = _get_bool_config(
         config, "EXPORTS", "EXPORT_SUBMISSIONS_SUMMARY", False
     )
+    export_syllabus = _get_bool_config(
+        config, "EXPORTS", "EXPORT_SYLLABUS", True
+    )
     export_inbox = _get_bool_config(
         config, "EXPORTS", "EXPORT_INBOX_CONVERSATIONS", False
     )
@@ -2281,6 +2409,24 @@ def main():
                 processed_canvas_page_keys=processed_canvas_page_keys,
                 force_regen=force_regen_all,
             )
+
+        # --- Course Syllabus ---
+        if export_syllabus:
+            try:
+                new_items_synced += process_course_syllabus(
+                    course_id,
+                    course_name,
+                    course_storage_path,
+                    canvas_api_url,
+                    canvas_headers,
+                    processed_canvas_file_ids,
+                    session=session,
+                    timeout=request_timeout,
+                    summary=summary,
+                    force_regen=force_regen_all,
+                )
+            except Exception as e:
+                print(f"Error exporting syllabus for '{course_name}': {e}")
 
         # --- Course-level reports and exports ---
         if reports_folder_path:

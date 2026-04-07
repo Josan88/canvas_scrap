@@ -56,3 +56,5 @@ EXPORT_GRADEBOOK_HISTORY = true
 EXPORT_SUBMISSIONS_SUMMARY = false
 # Global inbox conversations (not per-course); can be large → Conversations/conversations.json
 EXPORT_INBOX_CONVERSATIONS = false
+# Course syllabus → Syllabus/Syllabus.md (HTML body converted to Obsidian Markdown)
+EXPORT_SYLLABUS = true
