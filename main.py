@@ -1651,6 +1651,7 @@ def process_course_syllabus(
     processed_canvas_file_ids: dict,
     session: Optional[requests.Session] = None,
     timeout: int = DEFAULT_REQUEST_TIMEOUT,
+    per_page: int = DEFAULT_CANVAS_PER_PAGE,
     summary: Optional[SummaryCollector] = None,
     force_regen: bool = False,
 ):
@@ -1678,8 +1679,23 @@ def process_course_syllabus(
     if not syllabus_body or not syllabus_body.strip():
         return 0
 
+    groups_url = f"{base_url}/api/v1/courses/{course_id}/assignment_groups"
+    assignment_groups = get_paginated_canvas_items(groups_url, canvas_headers, session, timeout, per_page, suppress_errors=True) or []
+
+    assignments_url = f"{base_url}/api/v1/courses/{course_id}/assignments"
+    assignments = get_paginated_canvas_items(assignments_url, canvas_headers, session, timeout, per_page, suppress_errors=True) or []
+
     # Use the course-level updated_at as a proxy for change detection
     updated_at = course_data.get("updated_at")
+    
+    max_ast_ts = _max_timestamp_from_items(assignments, ["updated_at", "created_at", "due_at"])
+    max_group_ts = _max_timestamp_from_items(assignment_groups, ["updated_at", "created_at"])
+    
+    overall_updated_at = updated_at
+    if max_ast_ts and (not overall_updated_at or max_ast_ts > overall_updated_at):
+        overall_updated_at = max_ast_ts
+    if max_group_ts and (not overall_updated_at or max_group_ts > overall_updated_at):
+        overall_updated_at = max_group_ts
 
     syllabus_folder = get_or_create_local_folder(course_storage_path, "Syllabus")
     if not syllabus_folder:
@@ -1723,7 +1739,7 @@ def process_course_syllabus(
     if (
         not force_regen
         and not needs_retry
-        and not has_file_changed(existing_metadata, canvas_updated_at=updated_at)
+        and not has_file_changed(existing_metadata, canvas_updated_at=overall_updated_at)
     ):
         return 0
 
@@ -1744,15 +1760,69 @@ def process_course_syllabus(
             )
         )
 
+        groups_url = f"{base_url}/api/v1/courses/{course_id}/assignment_groups"
+        assignment_groups = get_paginated_canvas_items(groups_url, canvas_headers, session, timeout, per_page, suppress_errors=True) or []
+
+        assignments_url = f"{base_url}/api/v1/courses/{course_id}/assignments"
+        assignments = get_paginated_canvas_items(assignments_url, canvas_headers, session, timeout, per_page, suppress_errors=True) or []
+        
+        if assignments or assignment_groups:
+            if assignments:
+                md_lines.append("\n## Course summary:\n")
+                md_lines.append("| Date | Details | Due |")
+                md_lines.append("| :--- | :--- | :--- |")
+                
+                def get_due_date_for_sort(a):
+                    due = a.get("due_at")
+                    if due:
+                        return due
+                    return "9999-12-31T23:59:59Z"
+                    
+                sorted_assignments = sorted(assignments, key=get_due_date_for_sort)
+                
+                from datetime import datetime
+                for ast in sorted_assignments:
+                    name = ast.get("name", "Unnamed Assignment")
+                    due_at = ast.get("due_at")
+                    
+                    date_str = ""
+                    time_str = ""
+                    if due_at:
+                        try:
+                            dt = datetime.strptime(due_at, "%Y-%m-%dT%H:%M:%SZ")
+                            date_str = dt.strftime("%a, %d %b %Y")
+                            time_str = f"due by {dt.strftime('%H:%M')}"
+                        except Exception:
+                            date_str = due_at
+                            
+                    safe_name = sanitize_filename(name)
+                    details_link = f"[[{safe_name}]]"
+                    md_lines.append(f"| {date_str} | {details_link} | {time_str} |")
+                    
+            if assignment_groups:
+                md_lines.append("\n## Assignments are weighted by group:\n")
+                md_lines.append("| Group | Weight |")
+                md_lines.append("| :--- | :--- |")
+                total_weight = 0
+                for g in assignment_groups:
+                    name = g.get("name", "Unnamed Group")
+                    weight = g.get("group_weight", 0)
+                    total_weight += weight
+                    # Format float/int weight nicely
+                    weight_str = f"{weight:g}" if isinstance(weight, float) else f"{weight}"
+                    md_lines.append(f"| {name} | {weight_str}% |")
+                total_str = f"{total_weight:g}" if isinstance(total_weight, float) else f"{total_weight}"
+                md_lines.append(f"| **Total** | **{total_str}%** |")
+
         with open(local_md_path, "w", encoding="utf-8") as out:
             out.write("\n".join(md_lines))
 
         success = save_file_locally(local_md_path, md_filename, syllabus_folder)
         if success:
             new_items_count += 1
-            if updated_at:
+            if overall_updated_at:
                 set_file_mtime(
-                    os.path.join(syllabus_folder, md_filename), updated_at
+                    os.path.join(syllabus_folder, md_filename), overall_updated_at
                 )
             if summary and course_name:
                 summary.add_file(
@@ -2422,6 +2492,7 @@ def main():
                     processed_canvas_file_ids,
                     session=session,
                     timeout=request_timeout,
+                    per_page=canvas_per_page,
                     summary=summary,
                     force_regen=force_regen_all,
                 )
