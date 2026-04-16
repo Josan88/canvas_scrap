@@ -46,7 +46,7 @@ from canvasync.utils.config_helpers import (
     _persist_export_toggle,
 )
 from canvasync.utils.sanitize import sanitize_filename, sanitize_folder_name
-from canvasync.utils.obsidian import html_to_obsidian
+from canvasync.utils.obsidian import html_to_obsidian, set_known_wikilink_targets, is_known_wikilink_target
 from canvasync.utils.timestamps import (
     _max_timestamp_from_items,
     _should_regenerate_resource,
@@ -1796,7 +1796,10 @@ def process_course_syllabus(
                             date_str = due_at
                             
                     safe_name = sanitize_filename(name)
-                    details_link = f"[[{safe_name}]]"
+                    if is_known_wikilink_target(safe_name):
+                        details_link = f"[[{safe_name}]]"
+                    else:
+                        details_link = safe_name
                     md_lines.append(f"| {date_str} | {details_link} | {time_str} |")
                     
             if assignment_groups:
@@ -2336,6 +2339,7 @@ def main():
         print(f"\n--- Processing Course: {course_name} ---")
 
         # --- Process Quizzes ---
+        quizzes = []
         if runtime_export_flags["EXPORT_QUIZZES"]:
             print("Searching for quizzes...")
             quizzes = get_canvas_quizzes(
@@ -2368,12 +2372,65 @@ def main():
         processed_canvas_page_keys = set()
         new_items_synced = 0
 
-        # --- Process Assignments ---
+        # --- Pre-fetch resource names to build a known-targets registry ---
+        # This prevents html_to_obsidian from creating [[wikilinks]] to
+        # targets that don't exist as actual files in the vault.
         print("Searching for assignments...")
         assignments_url = f"{canvas_api_url}/api/v1/courses/{course_id}/assignments?include[]=rubric&include[]=submission"
         assignments = get_paginated_canvas_items(
             assignments_url, canvas_headers, session, request_timeout, canvas_per_page
         )
+
+        print("Collecting pages...")
+        discovered_pages = collect_course_pages(
+            course_id=course_id,
+            course_name=course_name,
+            canvas_api_url=canvas_api_url,
+            canvas_headers=canvas_headers,
+            session=session,
+            timeout=request_timeout,
+            per_page=canvas_per_page,
+        )
+
+        # Lightweight pre-fetch of discussion topic titles
+        discussion_titles_list = []
+        if export_discussions:
+            base_url_d = (canvas_api_url or "").rstrip("/")
+            disc_list_url = f"{base_url_d}/api/v1/courses/{course_id}/discussion_topics"
+            discussion_titles_list = get_paginated_canvas_items(
+                disc_list_url, canvas_headers, session, request_timeout,
+                canvas_per_page, suppress_errors=True,
+            ) or []
+
+        # Build the known-targets set
+        known_targets = set()
+        for a in assignments or []:
+            name = a.get("name")
+            if name:
+                known_targets.add(sanitize_filename(name))
+        for p in discovered_pages or []:
+            title = p.get("title")
+            if title:
+                known_targets.add(sanitize_filename(title))
+        for q in quizzes or []:
+            title = q.get("title")
+            if title:
+                known_targets.add(sanitize_filename(title))
+        for d in discussion_titles_list:
+            title = d.get("title")
+            if title:
+                known_targets.add(sanitize_filename(title))
+        # Include all files already on disk (previous syncs, PDFs, transcripts)
+        for dirpath, _, filenames in os.walk(course_storage_path):
+            for f in filenames:
+                known_targets.add(os.path.splitext(f)[0])
+                known_targets.add(f)
+                if f.lower().endswith(".pdf"):
+                    known_targets.add(os.path.splitext(f)[0] + "_pdf")
+
+        set_known_wikilink_targets(known_targets)
+
+        # --- Process Assignments ---
         if assignments:
             assignments_folder_path = get_or_create_local_folder(
                 course_storage_path, "Assignments"
@@ -2456,15 +2513,6 @@ def main():
                     print(f"An unexpected error occurred processing module item: {e}")
 
         print("Searching for pages outside modules...")
-        discovered_pages = collect_course_pages(
-            course_id=course_id,
-            course_name=course_name,
-            canvas_api_url=canvas_api_url,
-            canvas_headers=canvas_headers,
-            session=session,
-            timeout=request_timeout,
-            per_page=canvas_per_page,
-        )
         for page_data in discovered_pages:
             new_items_synced += process_canvas_page(
                 page_data,
@@ -2661,6 +2709,9 @@ def main():
         else:
             print(f"Synced/updated {new_items_synced} item(s) for '{course_name}'.")
 
+        # Clear the known-targets registry for this course
+        set_known_wikilink_targets(None)
+
     # Global (user-level) inbox conversations archive
     if export_inbox:
         try:
@@ -2678,7 +2729,6 @@ def main():
         except Exception as e:
             print(f"Error exporting inbox conversations: {e}")
 
-    # Extract newly downloaded PDFs to Markdown using opendataloader-pdf
     # Print summary before cleanup
     summary.print_summary()
     failed_extractions = summary.get_action_count_contains("extraction failed")

@@ -19,6 +19,34 @@ _INTERNAL_PATH_RE = re.compile(
     re.IGNORECASE,
 )
 
+# ---------------------------------------------------------------------------
+# Module-level registry of known wikilink targets.
+# When set (not None), html_to_obsidian will only create [[wikilinks]] for
+# targets that exist in this set.  Unrecognised targets are kept as plain
+# text so that no broken links are ever written to disk.
+# ---------------------------------------------------------------------------
+_known_wikilink_targets = None  # type: set | None
+
+
+def set_known_wikilink_targets(targets):
+    """Set (or clear) the registry of valid wikilink target names.
+
+    Call with a ``set`` of sanitised basenames (without ``.md`` extension)
+    before running any HTML-to-Obsidian conversion.  Call with ``None``
+    to disable target checking (all wikilinks are created unconditionally).
+    """
+    global _known_wikilink_targets
+    _known_wikilink_targets = targets
+
+
+def is_known_wikilink_target(target):
+    """Return *True* if *target* is a recognised wikilink destination.
+
+    When the registry is ``None`` (not initialised), this always returns
+    ``True`` so that the converter behaves as before.
+    """
+    return _known_wikilink_targets is None or target in _known_wikilink_targets
+
 
 def html_to_obsidian(html_content: str, file_id_map: dict = None, output_dir: str = None) -> str:
     """Convert Canvas HTML to Obsidian Markdown with ``[[wikilinks]]``.
@@ -126,13 +154,22 @@ def html_to_obsidian(html_content: str, file_id_map: dict = None, output_dir: st
         if is_pdf_link:
             # Remove .pdf extension if present and append _pdf
             base_name = re.sub(r"\.pdf$", "", sanitised, flags=re.IGNORECASE).strip()
-            wikilink = f"[[{base_name}_pdf]]"
+            wikilink_target = f"{base_name}_pdf"
         else:
-            wikilink = f"[[{sanitised}]]"
+            wikilink_target = sanitised
 
+        # Only create a wikilink when the target is known to exist.
+        if not is_known_wikilink_target(wikilink_target):
+            print(f"  - Skipped broken link (target not found): '{link_text}'")
+            anchor.replace_with(NavigableString(link_text))
+            continue
+
+        wikilink = f"[[{wikilink_target}]]"
         print(f"  - Converted internal link: '{link_text}' -> {wikilink}")
         anchor.replace_with(NavigableString(wikilink))
 
     markdown_content = md(str(soup), strip=["img"]).strip()
     # Unescape underscores that markdownify might have escaped inside wikilinks
     return markdown_content.replace(r"\_", "_")
+
+
