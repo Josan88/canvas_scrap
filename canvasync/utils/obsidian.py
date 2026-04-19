@@ -27,6 +27,15 @@ _INTERNAL_PATH_RE = re.compile(
 # ---------------------------------------------------------------------------
 _known_wikilink_targets = None  # type: set | None
 
+# ---------------------------------------------------------------------------
+# Module-level mapping of Canvas page slugs to sanitised page titles.
+# This allows html_to_obsidian to resolve the correct wikilink target when
+# the visible link text differs from the actual page title (e.g. an anchor
+# that says "list of approved topics" pointing to a page whose real title
+# is "[S1 2026] List of Approved Topics for D HD Projects").
+# ---------------------------------------------------------------------------
+_slug_to_title = None  # type: dict | None
+
 
 def set_known_wikilink_targets(targets):
     """Set (or clear) the registry of valid wikilink target names.
@@ -37,6 +46,28 @@ def set_known_wikilink_targets(targets):
     """
     global _known_wikilink_targets
     _known_wikilink_targets = targets
+
+
+def set_slug_to_title_map(mapping):
+    """Set (or clear) the Canvas page slug → sanitised-title mapping.
+
+    Call with a ``dict`` mapping URL slugs (e.g.
+    ``"s1-2026-list-of-approved-topics-for-d-hd-projects"``) to sanitised
+    page titles (e.g. ``"[S1 2026] List of Approved Topics for D HD Projects"``).
+    Call with ``None`` to clear the mapping.
+    """
+    global _slug_to_title
+    _slug_to_title = mapping
+
+
+def _resolve_slug_to_title(slug):
+    """Look up a Canvas URL slug in the slug-to-title mapping.
+
+    Returns the sanitised page title if found, otherwise ``None``.
+    """
+    if _slug_to_title is None or not slug:
+        return None
+    return _slug_to_title.get(slug)
 
 
 def is_known_wikilink_target(target):
@@ -160,9 +191,18 @@ def html_to_obsidian(html_content: str, file_id_map: dict = None, output_dir: st
 
         # Only create a wikilink when the target is known to exist.
         if not is_known_wikilink_target(wikilink_target):
-            print(f"  - Skipped broken link (target not found): '{link_text}'")
-            anchor.replace_with(NavigableString(link_text))
-            continue
+            # The visible link text didn't match — try resolving the actual
+            # page title from the URL slug (e.g. the anchor text might be
+            # "list of approved topics" while the real page title is
+            # "[S1 2026] List of Approved Topics for D HD Projects").
+            url_slug = unquote(match.group(1))
+            resolved_title = _resolve_slug_to_title(url_slug)
+            if resolved_title and is_known_wikilink_target(resolved_title):
+                wikilink_target = resolved_title
+            else:
+                print(f"  - Skipped broken link (target not found): '{link_text}'")
+                anchor.replace_with(NavigableString(link_text))
+                continue
 
         wikilink = f"[[{wikilink_target}]]"
         print(f"  - Converted internal link: '{link_text}' -> {wikilink}")

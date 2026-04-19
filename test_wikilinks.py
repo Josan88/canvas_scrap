@@ -3,12 +3,14 @@ from canvasync.utils.obsidian import (
     html_to_obsidian,
     set_known_wikilink_targets,
     is_known_wikilink_target,
+    set_slug_to_title_map,
 )
 
 html = '<a href="/courses/123/pages/my-page">My Page</a>'
 
 # Test 1: No registry (backwards compatible)
 set_known_wikilink_targets(None)
+set_slug_to_title_map(None)
 result = html_to_obsidian(html)
 print(f"Test 1 (no registry):    {repr(result)}")
 assert "[[My Page]]" in result, f"Expected wikilink, got: {result}"
@@ -45,5 +47,29 @@ result = html_to_obsidian(pdf_html, file_id_map={"456": "MyDoc.pdf"})
 print(f"Test 6 (PDF unknown):    {repr(result)}")
 assert "[[" not in result, f"Expected no wikilink, got: {result}"
 
+# Test 7: Slug resolution — visible text differs from actual page title
+# Simulates: link says "list of approved topics" but actual page title is
+# "[S1 2026] List of Approved Topics for D HD Projects"
+set_known_wikilink_targets({"[S1 2026] List of Approved Topics for D HD Projects"})
+set_slug_to_title_map({
+    "s1-2026-list-of-approved-topics-for-d-hd-projects":
+        "[S1 2026] List of Approved Topics for D HD Projects",
+})
+slug_html = '<a href="/courses/456/pages/s1-2026-list-of-approved-topics-for-d-hd-projects">list of approved topics</a>'
+result = html_to_obsidian(slug_html)
+print(f"Test 7 (slug resolved):  {repr(result)}")
+assert "[[" in result, f"Expected wikilink via slug resolution, got: {result}"
+assert "[S1 2026] List of Approved Topics for D HD Projects" in result, \
+    f"Expected resolved title in wikilink, got: {result}"
+
+# Test 8: Slug resolution — slug not in mapping → still falls back to plain text
+set_known_wikilink_targets({"Other Page"})
+set_slug_to_title_map({"some-other-slug": "Other Page"})
+result = html_to_obsidian(slug_html)
+print(f"Test 8 (slug not found): {repr(result)}")
+assert "[[" not in result, f"Expected no wikilink, got: {result}"
+assert "list of approved topics" in result, f"Expected plain text preserved, got: {result}"
+
 set_known_wikilink_targets(None)
+set_slug_to_title_map(None)
 print("\nAll tests passed!")

@@ -46,7 +46,7 @@ from canvasync.utils.config_helpers import (
     _persist_export_toggle,
 )
 from canvasync.utils.sanitize import sanitize_filename, sanitize_folder_name
-from canvasync.utils.obsidian import html_to_obsidian, set_known_wikilink_targets, is_known_wikilink_target
+from canvasync.utils.obsidian import html_to_obsidian, set_known_wikilink_targets, is_known_wikilink_target, set_slug_to_title_map
 from canvasync.utils.timestamps import (
     _max_timestamp_from_items,
     _should_regenerate_resource,
@@ -2430,6 +2430,17 @@ def main():
 
         set_known_wikilink_targets(known_targets)
 
+        # Build a slug-to-sanitised-title mapping so that wikilinks can be
+        # resolved even when the visible link text differs from the real
+        # page title (e.g. "list of approved topics" -> real title).
+        slug_to_title = {}
+        for p in discovered_pages or []:
+            slug = p.get("url") or p.get("page_url")
+            title = p.get("title")
+            if slug and title:
+                slug_to_title[slug] = sanitize_filename(title)
+        set_slug_to_title_map(slug_to_title)
+
         # --- Process Assignments ---
         if assignments:
             assignments_folder_path = get_or_create_local_folder(
@@ -2711,6 +2722,7 @@ def main():
 
         # Clear the known-targets registry for this course
         set_known_wikilink_targets(None)
+        set_slug_to_title_map(None)
 
     # Global (user-level) inbox conversations archive
     if export_inbox:
