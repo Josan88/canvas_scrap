@@ -537,26 +537,30 @@ def process_canvas_assignment(
                 except Exception as e:
                     print(f"Could not pre-fetch file {file_id} for assignment: {e}")
 
-    # Process submission attachments
+    # Process submission attachments into a dedicated subfolder.
     if submission:
         attachments = submission.get("attachments", [])
-        for attachment in attachments:
-            try:
-                process_canvas_file(
-                    attachment,
-                    assignment_storage_path,
-                    processed_canvas_file_ids,
-                    canvas_headers,
-                    session=session,
-                    timeout=timeout,
-                    summary=summary,
-                    course_name=course_name,
-                    dest_label=f"{course_name}/Assignments/{assignment_folder_name}",
-                )
-            except Exception as e:
-                print(
-                    f"Could not process attachment for submission in {assignment_name}: {e}"
-                )
+        if attachments:
+            submission_storage_path = get_or_create_local_folder(
+                assignment_storage_path, "submission"
+            )
+            for attachment in attachments:
+                try:
+                    process_canvas_file(
+                        attachment,
+                        submission_storage_path,
+                        processed_canvas_file_ids,
+                        canvas_headers,
+                        session=session,
+                        timeout=timeout,
+                        summary=summary,
+                        course_name=course_name,
+                        dest_label=f"{course_name}/Assignments/{assignment_folder_name}/submission",
+                    )
+                except Exception as e:
+                    print(
+                        f"Could not process attachment for submission in {assignment_name}: {e}"
+                    )
 
     # Check if assignment has changed (or force regeneration via config)
     needs_retry = needs_transcript_retry(description, assignment_storage_path)
