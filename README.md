@@ -15,6 +15,10 @@ This project pulls course content (assignments, pages, files, discussions, and o
 - PDF handling:
   - Saves original PDF files
   - Extracts PDF content to `*_pdf.md` using `opendataloader_pdf`
+- Office file handling (docx, pptx, xlsx):
+  - Saves original Office files
+  - Converts to PDF automatically using Python libraries (`python-docx`, `python-pptx`, `openpyxl` + `reportlab`)
+  - Extracts the generated PDF to `*_pdf.md` using `opendataloader_pdf`
 - Optional course reports (JSON): announcements, quizzes, enrollments, calendar events, groups, analytics, gradebook history, submissions summary
 - Optional global inbox conversations export (`Conversations/conversations.json`)
 - Endpoint auto-disable for unavailable Canvas APIs (HTTP 403/404), persisted to config
@@ -133,6 +137,15 @@ canvas_sync/
       linked_file.ext
     SomeFile.pdf
     SomeFile_pdf.md
+    Report.docx
+    Report.pdf
+    Report_pdf.md
+    Slides.pptx
+    Slides.pdf
+    Slides_pdf.md
+    Data.xlsx
+    Data.pdf
+    Data_pdf.md
   Conversations/
     conversations.json
 ```
@@ -147,6 +160,7 @@ The sync is designed to avoid unnecessary writes/downloads:
 - Change detection is primarily timestamp-driven (`updated_at` vs local mtime)
 - Linked files discovered multiple times in one run are deduplicated by Canvas file ID
 - If a PDF is unchanged but its extracted `*_pdf.md` is missing, extraction is attempted
+- If an Office file (docx/pptx/xlsx) is unchanged but its generated PDF or `*_pdf.md` is missing, conversion and extraction are attempted
 
 Run the tool twice in a row to verify unchanged resources are skipped.
 

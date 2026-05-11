@@ -4,3 +4,7 @@ reportlab
 markdownify
 youtube-transcript-api
 opendataloader_pdf
+opendataloader-pdf[hybrid]
+python-docx
+python-pptx
+openpyxl
