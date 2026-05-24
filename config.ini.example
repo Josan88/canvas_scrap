@@ -58,3 +58,17 @@ EXPORT_SUBMISSIONS_SUMMARY = false
 EXPORT_INBOX_CONVERSATIONS = false
 # Course syllabus → Syllabus/Syllabus.md (HTML body converted to Obsidian Markdown)
 EXPORT_SYLLABUS = true
+
+[NOTEBOOKLM]
+# Toggle whether to automatically sync to NotebookLM after Canvas sync completes (true/false)
+SYNC_AFTER_CANVAS = false
+# If true, actually upload new/changed sources. If false, only print a preview (dry-run).
+APPLY = false
+# Toggle whether to sync extracted *_pdf.md files as well
+INCLUDE_PDF_EXTRACTS = false
+# Toggle whether to sync files inside submission folders
+INCLUDE_SUBMISSIONS = false
+# Limit the number of pending uploads printed in the console preview
+MAX_LIST = 100
+# Prefix for NotebookLM notebook titles (e.g. "Canvas Sync - ")
+NOTEBOOK_PREFIX = Canvas Sync -

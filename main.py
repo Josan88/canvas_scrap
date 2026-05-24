@@ -2379,9 +2379,9 @@ def main():
     print("\nVerifying PDF extraction environment...")
     java_available, java_version, java_error = check_java_environment()
     if java_available:
-        print(f"✓ {java_version} detected")
+        print(f"[OK] {java_version} detected")
     else:
-        print("✗ Java environment check failed:")
+        print("[FAIL] Java environment check failed:")
         print(f"  {java_error}")
         print("\nCannot proceed with PDF extraction. Exiting.")
         return
@@ -2935,6 +2935,67 @@ def main():
                 print(f"  - {option} (HTTP {status})")
             else:
                 print(f"  - {option}")
+
+    # NotebookLM Sync integration
+    if _get_bool_config(config, "NOTEBOOKLM", "SYNC_AFTER_CANVAS", False):
+        print("\n--- Starting NotebookLM Sync ---")
+        try:
+            from canvasync.notebooklm_sync import (
+                load_state,
+                save_state,
+                discover_sources,
+                build_plan,
+                print_plan,
+                apply_plan,
+                DEFAULT_STATE_FILE,
+            )
+            from pathlib import Path
+
+            apply_sync = _get_bool_config(config, "NOTEBOOKLM", "APPLY", False)
+            include_pdf_extracts = _get_bool_config(config, "NOTEBOOKLM", "INCLUDE_PDF_EXTRACTS", False)
+            include_submissions = _get_bool_config(config, "NOTEBOOKLM", "INCLUDE_SUBMISSIONS", False)
+            
+            try:
+                max_list_str = config.get("NOTEBOOKLM", "MAX_LIST", fallback="100").strip()
+                max_list = int(max_list_str)
+            except (ValueError, AttributeError, KeyError):
+                max_list = 100
+                
+            notebook_prefix = config.get("NOTEBOOKLM", "NOTEBOOK_PREFIX", fallback="Canvas Sync - ")
+
+            state_path = Path(DEFAULT_STATE_FILE).resolve()
+            state = load_state(state_path)
+            root = Path(root_storage_path)
+
+            all_plans = []
+            for course in selected_courses:
+                course_name = course.get("name", "Unnamed")
+                course_folder_name = sanitize_folder_name(course_name, fallback="Unnamed Course")
+                
+                # Verify local course folder exists before planning
+                course_dir = root / course_folder_name
+                if not course_dir.exists():
+                    continue
+
+                sources = discover_sources(
+                    root,
+                    course_filter=course_folder_name,
+                    include_pdf_extracts=include_pdf_extracts,
+                    include_submissions=include_submissions,
+                )
+                plan = build_plan(sources, state)
+                all_plans.extend(plan)
+
+            print_plan(all_plans, max_items=max_list)
+
+            if not apply_sync:
+                print("\nDry run only. Enable [NOTEBOOKLM] APPLY = true in config.ini to upload new/changed sources.")
+            else:
+                uploaded = apply_plan(all_plans, state, notebook_prefix)
+                save_state(state_path, state)
+                print(f"\nUploaded {uploaded} source(s). State saved to {state_path}")
+        except Exception as error:
+            print(f"Error during NotebookLM sync: {error}")
 
     shutil.rmtree(DOWNLOAD_DIR)
     print("\n--- Sync Complete ---")
