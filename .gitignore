@@ -22,6 +22,7 @@ Thumbs.db
 
 # Credentials and config
 config.ini
+.notebooklm_sync.json
 
 # Temporary files
 *.tmp

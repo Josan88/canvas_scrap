@@ -107,6 +107,36 @@ You will be prompted to choose courses:
 
 At the end of the run, the script prints a summary and waits for Enter before exiting.
 
+## NotebookLM Sync Tracking
+
+After syncing Canvas locally, preview which sources would be uploaded to NotebookLM:
+
+```powershell
+python notebooklm_sync.py
+```
+
+The NotebookLM sync is dry-run by default. It scans `LOCAL_ROOT_DIR` from `config.ini`, includes normal Markdown files and original PDFs, and skips `*_pdf.md` extraction files because NotebookLM can process PDFs directly.
+
+To preview one course only:
+
+```powershell
+python notebooklm_sync.py --course "Course Folder Name"
+```
+
+To upload new or changed sources and save tracking state:
+
+```powershell
+python notebooklm_sync.py --apply
+```
+
+The tracking state is saved to `.notebooklm_sync.json`, which is ignored by git. The script creates or reuses one NotebookLM notebook per course folder, using the title prefix `Canvas Sync - `.
+
+Optional flags:
+
+- `--include-pdf-extracts`: also sync `*_pdf.md` files as a fallback for problematic PDFs
+- `--include-submissions`: also sync files inside `submission` folders
+- `--max-list 25`: limit the number of pending uploads printed in the preview
+
 ## Output Structure
 
 Under `LOCAL_ROOT_DIR`, each course gets its own folder. Typical layout:
