@@ -2991,8 +2991,7 @@ def main():
             if not apply_sync:
                 print("\nDry run only. Enable [NOTEBOOKLM] APPLY = true in config.ini to upload new/changed sources.")
             else:
-                uploaded = apply_plan(all_plans, state, notebook_prefix)
-                save_state(state_path, state)
+                uploaded = apply_plan(all_plans, state, state_path, notebook_prefix)
                 print(f"\nUploaded {uploaded} source(s). State saved to {state_path}")
         except Exception as error:
             print(f"Error during NotebookLM sync: {error}")

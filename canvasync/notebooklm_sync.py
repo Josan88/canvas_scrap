@@ -4,8 +4,10 @@ import datetime as dt
 import hashlib
 import json
 import os
+import shutil
 import subprocess
 import sys
+import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, Iterable, List, Optional
@@ -90,6 +92,20 @@ def hash_file(path: Path) -> str:
 def _path_has_part(path: Path, names: Iterable[str]) -> bool:
     lowered = {name.lower() for name in names}
     return any(part.lower() in lowered for part in path.parts)
+
+
+def short_upload_name(rel_path: str, kind: str) -> str:
+    stem = hashlib.sha256(rel_path.replace("\\", "/").encode()).hexdigest()[:12]
+    suffix = ".txt" if kind == "markdown" else Path(rel_path).suffix
+    return f"{stem}{suffix}"
+
+
+def notebooklm_title(rel_path: str) -> str:
+    max_len = 200
+    if len(rel_path) <= max_len:
+        return rel_path
+    digest = hashlib.sha256(rel_path.encode()).hexdigest()[:8]
+    return rel_path[: max_len - 9] + "_" + digest
 
 
 def is_eligible_source(
@@ -210,36 +226,78 @@ def get_or_create_notebook(course_name: str, state: dict, notebook_prefix: str) 
     return notebook_id
 
 
-def upload_source(source: SourceFile, notebook_id: str) -> str:
-    result = run_notebooklm(["source", "add", str(source.path), "--notebook", notebook_id])
-    source_info = result.get("source", {})
-    source_id = source_info.get("id")
-    if not source_id:
-        raise RuntimeError(f"NotebookLM source add returned no source id for {source.path}")
-    return source_id
-
-
-def apply_plan(plan: Iterable[PlannedSource], state: dict, notebook_prefix: str) -> int:
+def apply_plan(plan: Iterable[PlannedSource], state: dict, state_path: Path, notebook_prefix: str) -> int:
     uploaded = 0
     files = state.setdefault("files", {})
-    now = dt.datetime.now(dt.timezone.utc).isoformat()
-    for item in plan:
-        if item.action == "unchanged":
-            continue
-        notebook_id = get_or_create_notebook(item.source.course_name, state, notebook_prefix)
-        source_id = upload_source(item.source, notebook_id)
-        files[item.source.rel_path] = {
-            "kind": item.source.kind,
-            "course_name": item.source.course_name,
-            "sha256": item.source.sha256,
-            "size": item.source.size,
-            "mtime_ns": item.source.mtime_ns,
-            "notebook_id": notebook_id,
-            "source_id": source_id,
-            "synced_at": now,
-        }
-        uploaded += 1
-        print(f"Uploaded {item.action}: {item.source.rel_path}")
+    
+    with tempfile.TemporaryDirectory() as temp_dir:
+        temp_dir_path = Path(temp_dir)
+        
+        for item in plan:
+            if item.action == "unchanged":
+                continue
+            
+            try:
+                notebook_id = get_or_create_notebook(item.source.course_name, state, notebook_prefix)
+            except Exception as error:
+                print(f"  [ERROR] Failed to get/create notebook for {item.source.course_name}: {error}")
+                continue
+
+            # Build a short filesystem-safe temp name and a readable NotebookLM title
+            safe_name = short_upload_name(item.source.rel_path, item.source.kind)
+            title = notebooklm_title(item.source.rel_path)
+            
+            upload_path = temp_dir_path / safe_name
+            try:
+                shutil.copy2(item.source.path, upload_path)
+            except OSError as error:
+                print(f"  [ERROR] Failed to copy {item.source.rel_path} to temp upload: {error}")
+                continue
+
+            try:
+                print(f"\nUploading {item.action}: {item.source.rel_path}...")
+                
+                # Upload the source with a human-readable title
+                result = run_notebooklm(["source", "add", str(upload_path), "--notebook", notebook_id, "--title", title])
+                source_info = result.get("source", {})
+                source_id = source_info.get("id")
+                
+                if not source_id:
+                    print(f"  [ERROR] Upload returned no source ID for: {item.source.rel_path}")
+                    continue
+                
+                # Wait for source to process successfully
+                print(f"  Waiting for NotebookLM to process (ID: {source_id})...")
+                run_notebooklm(["source", "wait", source_id, "-n", notebook_id, "--timeout", "120"])
+                
+                # Update state immediately on success
+                now = dt.datetime.now(dt.timezone.utc).isoformat()
+                files[item.source.rel_path] = {
+                    "kind": item.source.kind,
+                    "course_name": item.source.course_name,
+                    "sha256": item.source.sha256,
+                    "size": item.source.size,
+                    "mtime_ns": item.source.mtime_ns,
+                    "notebook_id": notebook_id,
+                    "source_id": source_id,
+                    "synced_at": now,
+                }
+                uploaded += 1
+                
+                # Save state incrementally
+                save_state(state_path, state)
+                print(f"  [OK] Successfully synced: {item.source.rel_path}")
+                
+            except Exception as error:
+                print(f"  [ERROR] Failed to sync {item.source.rel_path}: {error}")
+                
+            finally:
+                if upload_path.exists():
+                    try:
+                        upload_path.unlink()
+                    except OSError:
+                        pass
+                        
     return uploaded
 
 
@@ -301,8 +359,7 @@ def main(argv: Optional[List[str]] = None) -> int:
         print("\nDry run only. Re-run with --apply to upload new/changed sources.")
         return 0
 
-    uploaded = apply_plan(plan, state, args.notebook_prefix)
-    save_state(state_path, state)
+    uploaded = apply_plan(plan, state, state_path, args.notebook_prefix)
     print(f"\nUploaded {uploaded} source(s). State saved to {state_path}")
     return 0
 

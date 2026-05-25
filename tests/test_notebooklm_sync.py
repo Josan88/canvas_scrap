@@ -5,7 +5,7 @@ from pathlib import Path
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
-from canvasync.notebooklm_sync import build_plan, discover_sources, is_eligible_source
+from canvasync.notebooklm_sync import apply_plan, build_plan, discover_sources, is_eligible_source, short_upload_name, notebooklm_title
 
 
 def write_file(path: Path, content: str = "content") -> Path:
@@ -99,3 +99,78 @@ def test_build_plan_marks_new_changed_and_unchanged(tmp_path):
         "Course A/New.md": "new",
         "Course A/Same.md": "unchanged",
     }
+
+
+def test_apply_plan_copies_and_uploads_incrementally(tmp_path, monkeypatch):
+    import canvasync.notebooklm_sync as nbs
+
+    write_file(tmp_path / "Course A" / "Page.md", "hello markdown")
+    write_file(tmp_path / "Course A" / "Image.pdf", "hello pdf")
+
+    sources = discover_sources(tmp_path)
+    plan = build_plan(sources, {})
+
+    notebook_calls = []
+    run_calls = []
+
+    def mock_get_or_create_notebook(course_name, state, prefix):
+        notebook_calls.append(course_name)
+        return "mock-notebook-id"
+
+    def mock_run_notebooklm(args):
+        run_calls.append(args)
+        if args[0] == "source" and args[1] == "add":
+            return {"source": {"id": "mock-source-id"}}
+        return {}
+
+    monkeypatch.setattr(nbs, "get_or_create_notebook", mock_get_or_create_notebook)
+    monkeypatch.setattr(nbs, "run_notebooklm", mock_run_notebooklm)
+
+    state = {}
+    state_path = tmp_path / "state.json"
+
+    uploaded = apply_plan(plan, state, state_path, "Prefix - ")
+
+    assert uploaded == 2
+    assert notebook_calls == ["Course A", "Course A"]
+    
+    add_calls = [c for c in run_calls if c[0] == "source" and c[1] == "add"]
+    wait_calls = [c for c in run_calls if c[0] == "source" and c[1] == "wait"]
+    
+    assert len(add_calls) == 2
+    assert len(wait_calls) == 2
+    
+    # Check --title is passed with readable course-relative path
+    for c in add_calls:
+        assert "--title" in c, f"Expected --title in add call args: {c}"
+    assert any("Course A/Page.md" in c for c in add_calls)
+    assert any("Course A/Image.pdf" in c for c in add_calls)
+
+    # Check temp filenames are short hash-based names (no path separators in basename)
+    for c in add_calls:
+        basename = c[2].rsplit("\\", 1)[-1].rsplit("/", 1)[-1]
+        assert "/" not in basename and "\\" not in basename, f"Temp basename should not contain separators: {basename}"
+        assert len(basename) < 50, f"Temp basename too long: {basename}"
+
+    # Check markdown gets .txt extension, PDF keeps .pdf
+    assert any(c[2].endswith(".txt") for c in add_calls)
+    assert any(c[2].endswith(".pdf") for c in add_calls)
+
+    assert state_path.exists()
+    assert state["files"]["Course A/Page.md"]["source_id"] == "mock-source-id"
+    assert state["files"]["Course A/Image.pdf"]["source_id"] == "mock-source-id"
+
+
+def test_long_path_uses_short_temp_filename(tmp_path):
+    long_rel = "COS20015 FUNDAMENTAL OF DATA MANAGEMENT/Discussions/2023 S1 Week 8 and 9 Lecture and Lab Discussion/2023 S1 Week 8 and 9 Lecture and Lab Discussion.pdf"
+
+    upload_name = short_upload_name(long_rel, "pdf")
+    assert len(upload_name) < 50, f"Upload name should be short, got {len(upload_name)}: {upload_name}"
+    assert "/" not in upload_name
+    assert "\\" not in upload_name
+    assert upload_name.endswith(".pdf")
+
+    title = notebooklm_title(long_rel)
+    assert "COS20015" in title
+    assert "Discussions" in title
+    assert title.endswith(".pdf")
