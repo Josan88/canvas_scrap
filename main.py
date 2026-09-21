@@ -3043,11 +3043,13 @@ if __name__ == "__main__":
                 sys.executable,
                 "-m",
                 "opendataloader_pdf.hybrid_server",
+                "--device",
+                "cpu",
                 "--enrich-formula",
-                "--enrich-picture-description",
             ],
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
+            stdin=subprocess.DEVNULL,
             **kwargs,
         )
         # Give the server a few seconds to initialize
