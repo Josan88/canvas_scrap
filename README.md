@@ -11,6 +11,7 @@ This project pulls course content (assignments, pages, files, discussions, and o
 - Assignment export to Markdown (including rubric/details)
 - Page export to Markdown (including page body)
 - Discussion export to Markdown plus optional course-level discussion JSON
+- Announcement export to Markdown, including linked and attached files, plus announcements JSON
 - Linked file discovery from assignments/pages/discussions (`/files/{id}` links)
 - PDF handling:
   - Saves original PDF files
@@ -151,6 +152,10 @@ canvas_sync/
     Discussions/
       Topic Title/
         Topic Title.md
+        linked_file.ext
+    Announcements/
+      Announcement Title/
+        Announcement Title.md
         linked_file.ext
     Reports/
       announcements.json

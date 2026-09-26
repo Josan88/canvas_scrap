@@ -79,6 +79,21 @@ def is_known_wikilink_target(target):
     return _known_wikilink_targets is None or target in _known_wikilink_targets
 
 
+def register_wikilink_target(name):
+    """Register a file saved during this run so same-run links can resolve."""
+    if _known_wikilink_targets is None or not name:
+        return
+    clean = sanitize_filename(str(name))
+    if not clean:
+        return
+    _known_wikilink_targets.add(clean)
+    stem, ext = os.path.splitext(clean)
+    if stem:
+        _known_wikilink_targets.add(stem)
+    if ext.lower() == ".pdf" and stem:
+        _known_wikilink_targets.add(f"{stem}_pdf")
+
+
 def html_to_obsidian(html_content: str, file_id_map: dict = None, output_dir: str = None) -> str:
     """Convert Canvas HTML to Obsidian Markdown with ``[[wikilinks]]``.
 

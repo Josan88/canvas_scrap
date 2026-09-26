@@ -51,6 +51,7 @@ from canvasync.utils.obsidian import (
     html_to_obsidian,
     set_known_wikilink_targets,
     is_known_wikilink_target,
+    register_wikilink_target,
     set_slug_to_title_map,
 )
 from canvasync.utils.timestamps import (
@@ -810,8 +811,9 @@ def process_canvas_discussion_topic(
     summary=None,
     course_name=None,
     force_regen=False,
+    section_name="Discussions",
 ):
-    """Saves a discussion topic and its entries into a PDF."""
+    """Saves a discussion topic or announcement, plus linked files, as Markdown."""
     if session is None:
         session = requests.Session()
 
@@ -857,6 +859,38 @@ def process_canvas_discussion_topic(
 
     # Pre-process linked files to build a mapping for wikilinks
     file_id_map = {}
+    api_root = (canvas_api_url or "").rstrip("/")
+
+    def remember_file(fid, fname):
+        if fid is None or not fname:
+            return
+        file_id_map[str(fid)] = fname
+        register_wikilink_target(fname)
+
+    def ingest_file_data(f_data, label):
+        if not isinstance(f_data, dict):
+            return
+        fname = f_data.get("display_name") or f_data.get("filename")
+        if not fname:
+            return
+        process_canvas_file(
+            f_data,
+            topic_storage_path,
+            processed_canvas_file_ids,
+            canvas_headers,
+            session=session,
+            timeout=timeout,
+            summary=summary,
+            course_name=course_name,
+            dest_label=f"{course_name}/{section_name}/{label}",
+        )
+        remember_file(f_data.get("id"), fname)
+
+    def fetch_file(fid):
+        f_url = f"{api_root}/api/v1/files/{fid}"
+        f_resp = session.get(f_url, headers=canvas_headers, timeout=timeout)
+        f_resp.raise_for_status()
+        return f_resp.json()
 
     def pre_process_files(html_content, label):
         if not html_content:
@@ -865,38 +899,42 @@ def process_canvas_discussion_topic(
         for link in soup_f.find_all("a", href=True):
             href = link.get("href", "")
             match = re.search(r"/files/(\d+)", href)
-            if match:
-                fid = match.group(1)
-                f_url = f"{canvas_api_url}/api/v1/files/{fid}"
-                try:
-                    f_resp = session.get(f_url, headers=canvas_headers, timeout=timeout)
-                    f_resp.raise_for_status()
-                    f_data = f_resp.json()
-                    fname = f_data.get("display_name")
-                    if fname:
-                        process_canvas_file(
-                            f_data,
-                            topic_storage_path,
-                            processed_canvas_file_ids,
-                            canvas_headers,
-                            session=session,
-                            timeout=timeout,
-                            summary=summary,
-                            course_name=course_name,
-                            dest_label=f"{course_name}/Discussions/{label}",
-                        )
-                        file_id_map[fid] = fname
-                except Exception:
-                    pass
+            if not match:
+                continue
+            fid = match.group(1)
+            if fid in file_id_map:
+                continue
+            try:
+                ingest_file_data(fetch_file(fid), label)
+            except Exception:
+                pass
+
+    def ingest_attachments(items, label):
+        for att in items or []:
+            if not isinstance(att, dict) or att.get("id") is None:
+                continue
+            fid = str(att.get("id"))
+            if fid in file_id_map:
+                continue
+            if att.get("url") and (att.get("display_name") or att.get("filename")):
+                ingest_file_data(att, label)
+                continue
+            try:
+                ingest_file_data(fetch_file(fid), label)
+            except Exception:
+                pass
 
     pre_process_files(message, safe_topic_title)
+    ingest_attachments(topic_info.get("attachments"), safe_topic_title)
     if entries:
         for entry in entries:
             pre_process_files(entry.get("message"), safe_topic_title)
+            ingest_attachments(entry.get("attachments"), safe_topic_title)
 
+    kind = "announcement" if section_name == "Announcements" else "discussion topic"
     if not md_already_exists:
         print(
-            f"{'Updating' if existing_metadata else 'New'} discussion topic found: '{topic_title}'"
+            f"{'Updating' if existing_metadata else 'New'} {kind} found: '{topic_title}'"
         )
         local_md_path = os.path.join(DOWNLOAD_DIR, md_filename)
         try:
@@ -949,7 +987,7 @@ def process_canvas_discussion_topic(
                         os.path.join(topic_storage_path, md_filename), updated_at
                     )
                 if summary and course_name:
-                    dest_label = f"{course_name}/Discussions/{safe_topic_title}"
+                    dest_label = f"{course_name}/{section_name}/{safe_topic_title}"
                     summary.add_file(
                         course_name,
                         dest_label,
@@ -1271,6 +1309,9 @@ def process_course_announcements(
     timeout: int = DEFAULT_REQUEST_TIMEOUT,
     per_page: int = DEFAULT_CANVAS_PER_PAGE,
     summary: Optional[SummaryCollector] = None,
+    announcements_folder_path=None,
+    processed_canvas_file_ids=None,
+    force_regen=False,
 ):
     if session is None:
         session = requests.Session()
@@ -1290,6 +1331,31 @@ def process_course_announcements(
     if not announcements:
         return 0
 
+    saved_count = 0
+    if announcements_folder_path:
+        if processed_canvas_file_ids is None:
+            processed_canvas_file_ids = {}
+        for announcement in announcements:
+            try:
+                saved_count += process_canvas_discussion_topic(
+                    announcement,
+                    course_id,
+                    announcements_folder_path,
+                    processed_canvas_file_ids,
+                    canvas_api_url,
+                    canvas_headers,
+                    session,
+                    timeout,
+                    summary,
+                    course_name,
+                    force_regen=force_regen,
+                    section_name="Announcements",
+                )
+            except Exception as e:
+                print(
+                    f"Error processing announcement '{announcement.get('title')}': {e}"
+                )
+
     latest_ts = _max_timestamp_from_items(
         announcements, ["posted_at", "last_reply_at", "updated_at"]
     )
@@ -1299,13 +1365,13 @@ def process_course_announcements(
     )
 
     if not _should_regenerate_resource(existing_metadata, latest_ts):
-        return 0
+        return saved_count
 
     print(
         f"{'Updating' if existing_metadata else 'New'} announcements for '{course_name}'"
     )
     reports_label = f"{course_name}/Reports"
-    return _export_json_resource(
+    return saved_count + _export_json_resource(
         announcements,
         filename,
         reports_folder_path_or_id,
@@ -2600,6 +2666,27 @@ def main():
             title = d.get("title")
             if title:
                 known_targets.add(sanitize_filename(title))
+
+        if export_announcements:
+            base_url_a = (canvas_api_url or "").rstrip("/")
+            ann_list_url = (
+                f"{base_url_a}/api/v1/announcements?context_codes[]=course_{course_id}"
+            )
+            announcement_titles = (
+                get_paginated_canvas_items(
+                    ann_list_url,
+                    canvas_headers,
+                    session,
+                    request_timeout,
+                    canvas_per_page,
+                    suppress_errors=True,
+                )
+                or []
+            )
+            for announcement in announcement_titles:
+                title = announcement.get("title")
+                if title:
+                    known_targets.add(sanitize_filename(title))
         # Include all files already on disk (previous syncs, PDFs, transcripts)
         for dirpath, _, filenames in os.walk(course_storage_path):
             for f in filenames:
@@ -2742,6 +2829,9 @@ def main():
         if reports_folder_path:
             if export_announcements:
                 try:
+                    announcements_folder_path = get_or_create_local_folder(
+                        course_storage_path, "Announcements"
+                    )
                     new_items_synced += process_course_announcements(
                         course_id,
                         course_name,
@@ -2752,6 +2842,9 @@ def main():
                         timeout=request_timeout,
                         per_page=canvas_per_page,
                         summary=summary,
+                        announcements_folder_path=announcements_folder_path,
+                        processed_canvas_file_ids=processed_canvas_file_ids,
+                        force_regen=force_regen_all,
                     )
                 except Exception as e:
                     print(f"Error exporting announcements for '{course_name}': {e}")
