@@ -3137,7 +3137,7 @@ if __name__ == "__main__":
                 "-m",
                 "opendataloader_pdf.hybrid_server",
                 "--device",
-                "cpu",
+                "cuda",
                 "--enrich-formula",
             ],
             stdout=subprocess.DEVNULL,
