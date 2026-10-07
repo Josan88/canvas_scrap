@@ -64,7 +64,8 @@ from canvasync.utils.youtube import extract_youtube_ids
 
 
 def needs_transcript_retry(html_content: Optional[str], output_dir: str) -> bool:
-    """Check if any YouTube videos in the HTML content are missing transcript files."""
+    """Check if any YouTube videos in the HTML content are missing transcript files
+    (or have older transcript files that lack the video details section)."""
     if not html_content or not output_dir:
         return False
 
@@ -73,6 +74,12 @@ def needs_transcript_retry(html_content: Optional[str], output_dir: str) -> bool
         transcript_filename = f"YouTube_Transcript_{vid}.md"
         transcript_path = os.path.join(output_dir, transcript_filename)
         if not os.path.exists(transcript_path):
+            return True
+        try:
+            with open(transcript_path, "r", encoding="utf-8") as tf:
+                if "## Video Details" not in tf.read():
+                    return True
+        except OSError:
             return True
     return False
 

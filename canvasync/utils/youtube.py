@@ -1,5 +1,6 @@
+import json
 import re
-from typing import List
+from typing import Dict, List, Optional
 from youtube_transcript_api import YouTubeTranscriptApi, TranscriptsDisabled, NoTranscriptFound
 from youtube_transcript_api._errors import IpBlocked
 
@@ -28,6 +29,114 @@ def extract_youtube_ids(text: str) -> List[str]:
     return unique_ids
 
 
+_BROWSER_HEADERS = {
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/114.0.0.0 Safari/537.36",
+    "Accept-Language": "en-US,en;q=0.9",
+}
+
+
+def _extract_json_string(page: str, key: str) -> Optional[str]:
+    """Pull the first ``"key":"value"`` JSON string out of a watch page."""
+    m = re.search(r'"%s":"((?:[^"\\]|\\.)*)"' % re.escape(key), page)
+    if not m:
+        return None
+    try:
+        return json.loads(f'"{m.group(1)}"')
+    except ValueError:
+        return m.group(1)
+
+
+def get_youtube_metadata(video_id: str) -> Dict[str, str]:
+    """Fetch video details (title, channel, duration, upload date, views, description).
+
+    Title and channel come from YouTube's oEmbed endpoint, which is stable and
+    needs no API key. The remaining fields are best-effort scraped from the
+    watch page and are simply omitted if YouTube changes its markup.
+    """
+    import requests
+
+    url = f"https://www.youtube.com/watch?v={video_id}"
+    meta: Dict[str, str] = {"video_id": video_id, "url": url}
+    session = requests.Session()
+    session.headers.update(_BROWSER_HEADERS)
+
+    try:
+        resp = session.get(
+            "https://www.youtube.com/oembed",
+            params={"url": url, "format": "json"},
+            timeout=15,
+        )
+        if resp.ok:
+            data = resp.json()
+            meta["title"] = data.get("title", "")
+            meta["channel"] = data.get("author_name", "")
+            meta["channel_url"] = data.get("author_url", "")
+            meta["thumbnail"] = data.get("thumbnail_url", "")
+    except Exception:
+        pass
+
+    try:
+        resp = session.get(url, timeout=15)
+        if resp.ok:
+            page = resp.text
+            if not meta.get("title"):
+                meta["title"] = _extract_json_string(page, "title") or ""
+            if not meta.get("channel"):
+                meta["channel"] = _extract_json_string(page, "author") or ""
+            length = _extract_json_string(page, "lengthSeconds")
+            if length and length.isdigit():
+                secs = int(length)
+                h, rem = divmod(secs, 3600)
+                m, s = divmod(rem, 60)
+                meta["duration"] = f"{h}:{m:02d}:{s:02d}" if h else f"{m}:{s:02d}"
+            publish = _extract_json_string(page, "publishDate") or _extract_json_string(page, "uploadDate")
+            if publish:
+                meta["published"] = publish[:10]
+            views = _extract_json_string(page, "viewCount")
+            if views and views.isdigit():
+                meta["views"] = f"{int(views):,}"
+            desc = _extract_json_string(page, "shortDescription")
+            if desc:
+                meta["description"] = desc
+    except Exception:
+        pass
+
+    return {k: v for k, v in meta.items() if v}
+
+
+def format_youtube_frontmatter(meta: Dict[str, str]) -> str:
+    """Render video metadata as YAML frontmatter (values JSON-quoted, which is valid YAML)."""
+    front = ["---"]
+    for key in ("title", "channel", "url", "published", "duration", "views", "video_id"):
+        if key in meta:
+            front.append(f"{key}: {json.dumps(meta[key], ensure_ascii=False)}")
+    front.append("---")
+    return "\n".join(front) + "\n"
+
+
+def format_youtube_details(meta: Dict[str, str]) -> str:
+    """Render video metadata as a Markdown ``## Video Details`` section."""
+    rows = ["## Video Details", ""]
+    if "title" in meta:
+        rows.append(f"- **Title:** [{meta['title']}]({meta['url']})")
+    else:
+        rows.append(f"- **URL:** {meta['url']}")
+    if "channel" in meta:
+        channel = f"[{meta['channel']}]({meta['channel_url']})" if "channel_url" in meta else meta["channel"]
+        rows.append(f"- **Channel:** {channel}")
+    if "published" in meta:
+        rows.append(f"- **Published:** {meta['published']}")
+    if "duration" in meta:
+        rows.append(f"- **Duration:** {meta['duration']}")
+    if "views" in meta:
+        rows.append(f"- **Views:** {meta['views']}")
+    if "description" in meta:
+        quoted = "\n".join(f"> {line}" if line else ">" for line in meta["description"].splitlines())
+        rows += ["", "### Description", "", quoted]
+
+    return "\n".join(rows) + "\n"
+
+
 def get_youtube_transcript(video_id: str) -> str:
     """Fetch transcript for a given YouTube video ID.
     
@@ -39,10 +148,7 @@ def get_youtube_transcript(video_id: str) -> str:
     try:
         import requests
         session = requests.Session()
-        session.headers.update({
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/114.0.0.0 Safari/537.36",
-            "Accept-Language": "en-US,en;q=0.9"
-        })
+        session.headers.update(_BROWSER_HEADERS)
         api = YouTubeTranscriptApi(http_client=session)
         transcript_list = api.list(video_id)
         transcript = None

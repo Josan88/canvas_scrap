@@ -1,5 +1,6 @@
 """Utility to convert Canvas HTML into Obsidian-flavoured Markdown with wikilinks."""
 
+import json
 import os
 import re
 from urllib.parse import unquote
@@ -8,7 +9,13 @@ from bs4 import BeautifulSoup, NavigableString
 from markdownify import markdownify as md
 
 from canvasync.utils.sanitize import sanitize_filename
-from canvasync.utils.youtube import extract_youtube_ids, get_youtube_transcript
+from canvasync.utils.youtube import (
+    extract_youtube_ids,
+    format_youtube_details,
+    format_youtube_frontmatter,
+    get_youtube_metadata,
+    get_youtube_transcript,
+)
 
 # Patterns that indicate an internal Canvas resource link.
 # Matches both relative (/courses/...) and absolute (https://...) links.
@@ -94,6 +101,63 @@ def register_wikilink_target(name):
         _known_wikilink_targets.add(f"{stem}_pdf")
 
 
+_VIDEO_DETAILS_MARKER = "## Video Details"
+_FRONTMATTER_TITLE_RE = re.compile(r'^title:\s*(".*")\s*$', re.MULTILINE)
+
+
+def _write_youtube_transcript(vid: str, transcript_path: str):
+    """Create (or backfill details into) a transcript file. Returns the video title if known."""
+    if os.path.exists(transcript_path):
+        try:
+            with open(transcript_path, "r", encoding="utf-8") as tf:
+                existing = tf.read()
+        except Exception as e:
+            print(f"  -> Error reading transcript: {e}")
+            return None
+
+        if _VIDEO_DETAILS_MARKER in existing:
+            m = _FRONTMATTER_TITLE_RE.search(existing)
+            if m:
+                try:
+                    return json.loads(m.group(1))
+                except ValueError:
+                    return None
+            return None
+
+        # Older transcript file without details: prepend them, keep the transcript text.
+        print(f"  - Adding video details to existing transcript for {vid}...")
+        meta = get_youtube_metadata(vid)
+        body = re.sub(r"^# YouTube Transcript \([^)]*\)\s*", "", existing, count=1)
+        _save_transcript_file(transcript_path, vid, meta, body.strip())
+        return meta.get("title")
+
+    print(f"  - Fetching YouTube transcript for {vid}...")
+    transcript_text = get_youtube_transcript(vid)
+    if transcript_text.startswith("_") and transcript_text.endswith("_"):
+        print(f"  -> Skipping transcript file creation: {transcript_text.strip('_')}")
+        return None
+
+    meta = get_youtube_metadata(vid)
+    _save_transcript_file(transcript_path, vid, meta, transcript_text)
+    return meta.get("title")
+
+
+def _save_transcript_file(transcript_path: str, vid: str, meta: dict, transcript_text: str) -> None:
+    heading = meta.get("title") or f"YouTube Video ({vid})"
+    content = (
+        f"{format_youtube_frontmatter(meta)}\n"
+        f"# {heading}\n\n"
+        f"{format_youtube_details(meta)}\n"
+        f"## Transcript\n\n{transcript_text}\n"
+    )
+    try:
+        os.makedirs(os.path.dirname(transcript_path) or ".", exist_ok=True)
+        with open(transcript_path, "w", encoding="utf-8") as tf:
+            tf.write(content)
+    except Exception as e:
+        print(f"  -> Error saving transcript: {e}")
+
+
 def html_to_obsidian(html_content: str, file_id_map: dict = None, output_dir: str = None) -> str:
     """Convert Canvas HTML to Obsidian Markdown with ``[[wikilinks]]``.
 
@@ -128,29 +192,19 @@ def html_to_obsidian(html_content: str, file_id_map: dict = None, output_dir: st
             continue
             
         vid = vids[0]
+        video_title = None
         # Only fetch if we have an output_dir
         if output_dir:
             transcript_filename = f"YouTube_Transcript_{vid}.md"
             transcript_path = os.path.join(output_dir, transcript_filename)
-            if not os.path.exists(transcript_path):
-                print(f"  - Fetching YouTube transcript for {vid}...")
-                transcript_text = get_youtube_transcript(vid)
-                if transcript_text.startswith("_") and transcript_text.endswith("_"):
-                    print(f"  -> Skipping transcript file creation: {transcript_text.strip('_')}")
-                else:
-                    try:
-                        os.makedirs(output_dir, exist_ok=True)
-                        with open(transcript_path, "w", encoding="utf-8") as tf:
-                            tf.write(f"# YouTube Transcript ({vid})\n\n{transcript_text}\n")
-                    except Exception as e:
-                        print(f"  -> Error saving transcript: {e}")
-                    
+            video_title = _write_youtube_transcript(vid, transcript_path)
+
         wikilink = f" [[YouTube_Transcript_{vid}]]"
         if tag.name == "iframe":
             replacement = soup.new_tag("p")
             watch_url = f"https://www.youtube.com/watch?v={vid}"
             a_tag = soup.new_tag("a", href=watch_url)
-            a_tag.string = f"Watch Video ({vid})"
+            a_tag.string = f"Watch Video: {video_title}" if video_title else f"Watch Video ({vid})"
             replacement.append(a_tag)
             replacement.append(NavigableString(wikilink))
             tag.replace_with(replacement)
