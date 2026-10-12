@@ -34,6 +34,16 @@ CANVAS_PER_PAGE = 100
 # HTTP connection pool size for Canvas requests
 HTTP_POOL_MAXSIZE = 20
 
+[PDF_EXTRACTION]
+# Device for the hybrid PDF server: auto, cpu, cuda, mps, xpu
+DEVICE = cuda
+# Convert equations to LaTeX (true/false). Slow on math-heavy lecture slides. Default is true.
+ENRICH_FORMULA = true
+# Equations sent to the formula model per batch (docling's own default is 5)
+FORMULA_BATCH_SIZE = 16
+# Max LaTeX tokens per equation; stops unreadable equations looping (docling's default is 2048)
+FORMULA_MAX_TOKENS = 512
+
 [EXPORTS]
 # Toggle optional exports (true/false). Defaults: most ON, heavy ones OFF.
 # Course announcements → Reports/announcements.json

@@ -3122,6 +3122,10 @@ if __name__ == "__main__":
         # Strip the '-m' and module name so argparse in the hybrid server doesn't fail
         del sys.argv[1:3]
 
+        from canvasync.utils.hybrid_tuning import apply_hybrid_server_tuning
+
+        apply_hybrid_server_tuning()
+
         # Use direct import instead of runpy.run_module for better PyInstaller compatibility
         from opendataloader_pdf.hybrid_server import main as hybrid_main
 
@@ -3137,19 +3141,56 @@ if __name__ == "__main__":
                 subprocess, "CREATE_NO_WINDOW", 0x08000000
             )
 
-        print("Starting hybrid server in background...")
+        # PDF extraction tuning from config (optional)
+        pdf_config = configparser.ConfigParser()
+        pdf_config.read(CONFIG_FILE)
+        pdf_device = pdf_config.get("PDF_EXTRACTION", "DEVICE", fallback="cuda").strip()
+        # Formula enrichment runs a LaTeX model on every equation; slow on math-heavy slides
+        enrich_formula = _get_bool_config(
+            pdf_config, "PDF_EXTRACTION", "ENRICH_FORMULA", True
+        )
+        server_args = ["--device", pdf_device]
+        if enrich_formula:
+            server_args.append("--enrich-formula")
+
+        from canvasync.utils.hybrid_tuning import (
+            FORMULA_BATCH_ENV,
+            FORMULA_MAX_TOKENS_ENV,
+        )
+
+        server_env = os.environ.copy()
+        server_env[FORMULA_BATCH_ENV] = pdf_config.get(
+            "PDF_EXTRACTION", "FORMULA_BATCH_SIZE", fallback="16"
+        ).strip()
+        server_env[FORMULA_MAX_TOKENS_ENV] = pdf_config.get(
+            "PDF_EXTRACTION", "FORMULA_MAX_TOKENS", fallback="512"
+        ).strip()
+        # AMD ROCm: skip MIOpen's exhaustive kernel search and use the fast attention kernels
+        server_env.setdefault("MIOPEN_FIND_MODE", "FAST")
+        server_env.setdefault("TORCH_ROCM_AOTRITON_ENABLE_EXPERIMENTAL", "1")
+
+        # Launch through this script (not the module directly) so the tuning
+        # patches in the '-m opendataloader_pdf.hybrid_server' branch above apply.
+        # A frozen exe already routes back into this script via sys.executable.
+        launcher = [sys.executable]
+        if not getattr(sys, "frozen", False):
+            launcher.append(os.path.abspath(__file__))
+
+        print(
+            f"Starting hybrid server in background (device={pdf_device}, "
+            f"formula enrichment={'on' if enrich_formula else 'off'})..."
+        )
         server_process = subprocess.Popen(
             [
-                sys.executable,
+                *launcher,
                 "-m",
                 "opendataloader_pdf.hybrid_server",
-                "--device",
-                "cuda",
-                "--enrich-formula",
+                *server_args,
             ],
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
             stdin=subprocess.DEVNULL,
+            env=server_env,
             **kwargs,
         )
         # Give the server a few seconds to initialize
