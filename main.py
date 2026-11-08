@@ -59,8 +59,68 @@ from canvasync.utils.timestamps import (
     _should_regenerate_resource,
 )
 from canvasync.utils.youtube import extract_youtube_ids
+from canvasync.utils.canvas_media import (
+    embedded_video_downloads_enabled,
+    find_media_embeds,
+    needs_media_embed_retry,
+    resolve_media_file_info,
+    set_embedded_video_downloads,
+)
 
 # --- Helper Functions ---
+
+
+def download_embedded_media(
+    html_content: Optional[str],
+    dest_folder: str,
+    processed_canvas_file_ids,
+    canvas_api_url: str,
+    canvas_headers: dict,
+    file_id_map: Dict[str, str],
+    session: Optional[requests.Session] = None,
+    timeout: int = DEFAULT_REQUEST_TIMEOUT,
+    summary: Optional[SummaryCollector] = None,
+    course_name: Optional[str] = None,
+    dest_label: Optional[str] = None,
+) -> None:
+    """Download Canvas-hosted videos embedded in *html_content* into *dest_folder*.
+
+    Each downloaded video is added to *file_id_map* under its embed key so
+    ``html_to_obsidian`` can replace the player iframe with ``![[video]]``.
+    """
+    if not html_content or not dest_folder or not embedded_video_downloads_enabled():
+        return
+    if session is None:
+        session = requests.Session()
+    for embed in find_media_embeds(html_content):
+        key = embed["key"]
+        if key in file_id_map:
+            continue
+        try:
+            f_data = resolve_media_file_info(
+                key, canvas_api_url, canvas_headers, session, timeout
+            )
+        except (requests.RequestException, ValueError) as e:
+            print(f"Could not look up embedded video {key}: {e}")
+            continue
+        fname = (f_data or {}).get("display_name")
+        if not fname:
+            print(
+                f"Embedded video {key} has no downloadable file; keeping the Canvas player link"
+            )
+            continue
+        process_canvas_file(
+            f_data,
+            dest_folder,
+            processed_canvas_file_ids,
+            canvas_headers,
+            session=session,
+            timeout=timeout,
+            summary=summary,
+            course_name=course_name,
+            dest_label=dest_label,
+        )
+        file_id_map[key] = fname
 
 
 def needs_transcript_retry(html_content: Optional[str], output_dir: str) -> bool:
@@ -590,6 +650,19 @@ def process_canvas_assignment(
                         file_id_map[file_id] = filename_from_api
                 except Exception as e:
                     print(f"Could not pre-fetch file {file_id} for assignment: {e}")
+        download_embedded_media(
+            description,
+            assignment_storage_path,
+            processed_canvas_file_ids,
+            canvas_api_url,
+            canvas_headers,
+            file_id_map,
+            session=session,
+            timeout=timeout,
+            summary=summary,
+            course_name=course_name,
+            dest_label=f"{course_name}/Assignments/{assignment_folder_name}",
+        )
 
     # Process submission attachments into a dedicated subfolder.
     if submission:
@@ -617,7 +690,11 @@ def process_canvas_assignment(
                     )
 
     # Check if assignment has changed (or force regeneration via config)
-    needs_retry = needs_transcript_retry(description, assignment_storage_path)
+    needs_retry = needs_transcript_retry(
+        description, assignment_storage_path
+    ) or needs_media_embed_retry(
+        description, os.path.join(assignment_storage_path, md_filename), file_id_map
+    )
     if not needs_retry and submission:
         needs_retry = needs_transcript_retry(
             submission.get("body"), assignment_storage_path
@@ -915,6 +992,19 @@ def process_canvas_discussion_topic(
                 ingest_file_data(fetch_file(fid), label)
             except Exception:
                 pass
+        download_embedded_media(
+            html_content,
+            topic_storage_path,
+            processed_canvas_file_ids,
+            api_root,
+            canvas_headers,
+            file_id_map,
+            session=session,
+            timeout=timeout,
+            summary=summary,
+            course_name=course_name,
+            dest_label=f"{course_name}/{section_name}/{label}",
+        )
 
     def ingest_attachments(items, label):
         for att in items or []:
@@ -937,6 +1027,12 @@ def process_canvas_discussion_topic(
         for entry in entries:
             pre_process_files(entry.get("message"), safe_topic_title)
             ingest_attachments(entry.get("attachments"), safe_topic_title)
+
+    if md_already_exists:
+        md_path = os.path.join(topic_storage_path, md_filename)
+        html_parts = [message] + [e.get("message") for e in entries or []]
+        if any(needs_media_embed_retry(h, md_path, file_id_map) for h in html_parts):
+            md_already_exists = False
 
     kind = "announcement" if section_name == "Announcements" else "discussion topic"
     if not md_already_exists:
@@ -1253,10 +1349,26 @@ def process_canvas_page(
                     print(
                         f"Could not pre-fetch file {fid} for page '{page_title}': {e}"
                     )
+        download_embedded_media(
+            html_body,
+            page_storage_path,
+            processed_canvas_file_ids,
+            canvas_api_url,
+            canvas_headers,
+            file_id_map,
+            session=session,
+            timeout=timeout,
+            summary=summary,
+            course_name=course_name,
+            dest_label=f"{course_name}/{page_folder_name}",
+        )
 
         if (
             force_regen
             or needs_transcript_retry(html_body, page_storage_path)
+            or needs_media_embed_retry(
+                html_body, os.path.join(page_storage_path, md_filename), file_id_map
+            )
             or has_file_changed(existing_metadata, canvas_updated_at=updated_at)
         ):
             print(
@@ -1324,8 +1436,10 @@ def process_course_announcements(
         session = requests.Session()
 
     base_url = (canvas_api_url or "").rstrip("/")
+    # Without explicit dates Canvas only returns announcements from the last 14 days.
     announcements_url = (
         f"{base_url}/api/v1/announcements?context_codes[]=course_{course_id}"
+        "&start_date=2000-01-01&end_date=2100-01-01"
     )
     announcements = get_paginated_canvas_items(
         announcements_url,
@@ -1952,8 +2066,25 @@ def process_course_syllabus(
                     file_id_map[fid] = fname
             except Exception as e:
                 print(f"Could not pre-fetch file {fid} for syllabus: {e}")
+    download_embedded_media(
+        syllabus_body,
+        syllabus_folder,
+        processed_canvas_file_ids,
+        canvas_api_url,
+        canvas_headers,
+        file_id_map,
+        session=session,
+        timeout=timeout,
+        summary=summary,
+        course_name=course_name,
+        dest_label=f"{course_name}/Syllabus",
+    )
 
-    needs_retry = needs_transcript_retry(syllabus_body, syllabus_folder)
+    needs_retry = needs_transcript_retry(
+        syllabus_body, syllabus_folder
+    ) or needs_media_embed_retry(
+        syllabus_body, os.path.join(syllabus_folder, md_filename), file_id_map
+    )
 
     if (
         not force_regen
@@ -2499,6 +2630,9 @@ def main():
     export_syllabus = _get_bool_config(config, "EXPORTS", "EXPORT_SYLLABUS", True)
     export_inbox = _get_bool_config(
         config, "EXPORTS", "EXPORT_INBOX_CONVERSATIONS", False
+    )
+    set_embedded_video_downloads(
+        _get_bool_config(config, "EXPORTS", "DOWNLOAD_EMBEDDED_VIDEOS", True)
     )
 
     runtime_export_flags = {

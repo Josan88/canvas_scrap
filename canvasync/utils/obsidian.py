@@ -8,6 +8,7 @@ from urllib.parse import unquote
 from bs4 import BeautifulSoup, NavigableString
 from markdownify import markdownify as md
 
+from canvasync.utils.canvas_media import media_embed_key, media_embed_title
 from canvasync.utils.sanitize import sanitize_filename
 from canvasync.utils.youtube import (
     extract_youtube_ids,
@@ -217,6 +218,27 @@ def html_to_obsidian(html_content: str, file_id_map: dict = None, output_dir: st
             # Important: Make sure not to double add if we process twice
             if wikilink not in tag.get_text():
                 tag.append(NavigableString(wikilink))
+
+    # Canvas-hosted videos (media player iframes): link to the player and, when
+    # the video was downloaded next to this note, embed it with ![[file]].
+    for tag in soup.find_all(["iframe", "video", "audio", "a"]):
+        key = media_embed_key(tag)
+        if not key:
+            continue
+        filename = file_id_map.get(key)
+        downloaded = bool(filename) and (
+            output_dir is None or os.path.exists(os.path.join(output_dir, filename))
+        )
+        title = filename or media_embed_title(tag) or "Canvas video"
+        src = tag.get("src") or tag.get("href") or ""
+        replacement = soup.new_tag("p")
+        link = soup.new_tag("a", href=src)
+        link.string = f"Video: {title}"
+        replacement.append(link)
+        if downloaded:
+            replacement.append(soup.new_tag("br"))
+            replacement.append(NavigableString(f"![[{filename}]]"))
+        tag.replace_with(replacement)
 
     for anchor in soup.find_all("a", href=True):
         href = anchor.get("href", "")

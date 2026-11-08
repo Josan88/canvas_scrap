@@ -68,6 +68,10 @@ EXPORT_SUBMISSIONS_SUMMARY = false
 EXPORT_INBOX_CONVERSATIONS = false
 # Course syllabus → Syllabus/Syllabus.md (HTML body converted to Obsidian Markdown)
 EXPORT_SYLLABUS = true
+# Canvas-hosted videos embedded in pages/assignments/discussions/announcements/syllabus
+# (e.g. lecture recordings) → saved next to the note and embedded as ![[video.mp4]].
+# Lecture recordings can be hundreds of MB each. When false, notes keep a link to the Canvas player.
+DOWNLOAD_EMBEDDED_VIDEOS = true
 
 [NOTEBOOKLM]
 # Toggle whether to automatically sync to NotebookLM after Canvas sync completes (true/false)

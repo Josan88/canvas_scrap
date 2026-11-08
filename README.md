@@ -13,6 +13,7 @@ This project pulls course content (assignments, pages, files, discussions, and o
 - Discussion export to Markdown plus optional course-level discussion JSON
 - Announcement export to Markdown, including linked and attached files, plus announcements JSON
 - Linked file discovery from assignments/pages/discussions (`/files/{id}` links)
+- Embedded Canvas video download (lecture recordings in the Canvas media player): saved next to the note and embedded with `![[video.mp4]]`, plus a link back to the Canvas player
 - PDF handling:
   - Saves original PDF files
   - Extracts PDF content to `*_pdf.md` using `opendataloader_pdf`
@@ -88,6 +89,7 @@ Toggle optional exports with `true/false`:
 - `EXPORT_GRADEBOOK_HISTORY` (default `true`)
 - `EXPORT_SUBMISSIONS_SUMMARY` (default `false`)
 - `EXPORT_INBOX_CONVERSATIONS` (default `false`)
+- `DOWNLOAD_EMBEDDED_VIDEOS` (default `true`): download Canvas-hosted videos embedded in content. Lecture recordings can be hundreds of MB each; when `false`, notes keep a link to the Canvas player instead
 
 If quizzes/analytics/gradebook endpoints return 403/404, the corresponding export can be auto-disabled and persisted to `config.ini`.
 
