@@ -110,6 +110,23 @@ You will be prompted to choose courses:
 
 At the end of the run, the script prints a summary and waits for Enter before exiting.
 
+## Live Quiz Attempts
+
+Canvas only lets students read a quiz's questions while their attempt is running, and quizzes set to hide results never show them again after submission. To keep a copy, start the quiz in Canvas, then run:
+
+```powershell
+python live_quiz.py
+```
+
+It checks every active course (or only the ones you name with `--course 1596`, repeatable) for classic-quiz attempts you've started but not submitted. Each one is saved to `Course Name/Quizzes/<Quiz Title>/<Quiz Title> - attempt N.md`. Question images, such as a scanned question sheet, are downloaded next to the note and embedded with `![[image.png]]`, and equation-editor images become `$LaTeX$`. Answers you've already saved in Canvas are shown as ticked options or under "Saved answer".
+
+Notes:
+
+- It only sends GET requests, so it never starts, saves or submits an attempt. Run it again to refresh the note.
+- It finds quizzes through the course's assignments, so it works when a course hides its Quizzes page (the reason `EXPORT_QUIZZES` gets auto-disabled).
+- New Quizzes aren't supported: Canvas doesn't give students their New Quiz attempts through the API.
+- Quizzes that need an access code, a lockdown browser or a campus IP address can refuse the request (HTTP 401/403).
+
 ## NotebookLM Sync Tracking
 
 After syncing Canvas locally, preview which sources would be uploaded to NotebookLM:
@@ -159,6 +176,10 @@ canvas_sync/
       Announcement Title/
         Announcement Title.md
         linked_file.ext
+    Quizzes/
+      Quiz Title/
+        Quiz Title - attempt 1.md   (from live_quiz.py)
+        question_image.png
     Reports/
       announcements.json
       discussion_topics.json
