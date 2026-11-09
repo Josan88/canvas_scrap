@@ -4,3 +4,4 @@ markdownify
 youtube-transcript-api
 opendataloader_pdf
 opendataloader-pdf[hybrid]
+faster-whisper

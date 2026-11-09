@@ -1,3 +1,4 @@
+import threading
 from collections import defaultdict
 from typing import DefaultDict, Dict, List
 
@@ -9,13 +10,16 @@ class SummaryCollector:
         # Structure: { course_name: { dest_label: [ (filename, action) ] } }
         self.per_course: Dict[str, DefaultDict[str, List[tuple]]] = {}
         self.downloaded_pdfs: List[str] = []
+        # Background PDF extraction and transcription jobs add entries too.
+        self._lock = threading.Lock()
 
     def add_file(self, course_name: str, dest_label: str, filename: str, action: str):
         if not course_name or not dest_label or not filename:
             return
-        if course_name not in self.per_course:
-            self.per_course[course_name] = defaultdict(list)
-        self.per_course[course_name][dest_label].append((filename, action))
+        with self._lock:
+            if course_name not in self.per_course:
+                self.per_course[course_name] = defaultdict(list)
+            self.per_course[course_name][dest_label].append((filename, action))
 
     def has_changes(self) -> bool:
         return any(self.per_course.get(c) for c in self.per_course)

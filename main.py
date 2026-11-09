@@ -6,6 +6,7 @@ import requests
 import configparser
 import shutil
 import re
+import threading
 from typing import Optional, Dict, List, Any, Set
 from urllib.parse import unquote
 from bs4 import BeautifulSoup
@@ -59,15 +60,166 @@ from canvasync.utils.timestamps import (
     _should_regenerate_resource,
 )
 from canvasync.utils.youtube import extract_youtube_ids
+from canvasync.utils.background import PDF, TRANSCRIBE, background_jobs
 from canvasync.utils.canvas_media import (
+    add_transcript_links,
     embedded_video_downloads_enabled,
     find_media_embeds,
     needs_media_embed_retry,
     resolve_media_file_info,
     set_embedded_video_downloads,
 )
+from canvasync.utils.transcribe import (
+    configure_transcription,
+    copy_transcript,
+    is_media_file,
+    needs_transcript,
+    transcript_name,
+    transcript_path,
+    transcribe_media,
+    transcription_available,
+    transcription_enabled,
+)
 
 # --- Helper Functions ---
+
+
+def transcribe_downloaded_media(
+    media_path: str, file_updated_at: Optional[str] = None
+) -> Optional[bool]:
+    """Transcribe a downloaded video next to itself.
+
+    Returns ``None`` when transcription is off or unavailable (nothing attempted),
+    ``True`` on success and ``False`` on failure.
+    """
+    if not transcription_enabled() or not transcription_available():
+        return None
+    success, error = transcribe_media(media_path)
+    if not success:
+        print(f"  -> Error transcribing {os.path.basename(media_path)}:\n     {error}")
+        return False
+    out_path = transcript_path(media_path)
+    if file_updated_at and os.path.exists(out_path):
+        set_file_mtime(out_path, file_updated_at)
+    _note_new_transcript(media_path)
+    return True
+
+
+# Videos that got a transcript this run, so notes written before the transcript
+# finished can be given their "Transcript:" link once the background jobs end.
+_new_transcripts: List[str] = []
+_new_transcripts_lock = threading.Lock()
+
+
+def _note_new_transcript(media_path: str) -> None:
+    with _new_transcripts_lock:
+        _new_transcripts.append(media_path)
+
+
+def link_new_transcripts() -> int:
+    """Link this run's new transcripts from the notes that embed their videos.
+
+    Call after ``background_jobs.wait()``, once every note has been written.
+    Returns the number of notes changed.
+    """
+    with _new_transcripts_lock:
+        paths = list(dict.fromkeys(_new_transcripts))
+        _new_transcripts.clear()
+    return sum(add_transcript_links(path) for path in paths)
+
+
+def can_transcribe() -> bool:
+    return transcription_enabled() and transcription_available()
+
+
+def queue_transcription(
+    media_path: str,
+    file_updated_at: Optional[str] = None,
+    on_result=None,
+) -> bool:
+    """Transcribe *media_path* on the background transcription worker.
+
+    *on_result* receives ``transcribe_downloaded_media``'s result. Returns
+    False (nothing queued) when transcription is off or unavailable.
+    """
+    if not can_transcribe():
+        return False
+
+    def job():
+        result = transcribe_downloaded_media(media_path, file_updated_at)
+        if on_result:
+            on_result(result)
+
+    if background_jobs.submit(TRANSCRIBE, job, key=(TRANSCRIBE, media_path)):
+        if background_jobs.running:
+            print(f"Queued '{os.path.basename(media_path)}' for transcription")
+    return True
+
+
+def queue_transcript_copy(source_media_path: str, dest_media_path: str) -> None:
+    """Copy a transcript next to a copied video once its transcription has finished.
+
+    Runs on the transcription worker, so it waits for any queued transcription
+    of the source video.
+    """
+
+    def job():
+        if copy_transcript(source_media_path, dest_media_path):
+            print(
+                f"Copied transcript of '{os.path.basename(dest_media_path)}' "
+                f"to '{os.path.dirname(dest_media_path)}'"
+            )
+            _note_new_transcript(dest_media_path)
+
+    background_jobs.submit(TRANSCRIBE, job)
+
+
+def extract_document(
+    source_path: str, folder_path: str, file_updated_at: Optional[str] = None
+) -> bool:
+    """Extract a PDF or Office file to ``<stem>_pdf.md`` in *folder_path*.
+
+    Office files are converted to PDF with LibreOffice first. Prints any error
+    and returns whether the Markdown was written.
+    """
+    filename = os.path.basename(source_path)
+    stem = os.path.splitext(filename)[0]
+    pdf_path = source_path
+    if is_office_file(filename):
+        print(f"Converting '{filename}' to PDF...")
+        conv_success, pdf_path, conv_error = convert_office_to_pdf(source_path, folder_path)
+        if not conv_success:
+            print(f"  -> Error converting {filename} to PDF:\n     {conv_error}")
+            return False
+    print(f"Extracting '{os.path.basename(pdf_path)}' using Hybrid Mode...")
+    success, error = extract_pdf_with_diagnostics(pdf_path, folder_path)
+    if not success:
+        print(f"  -> Error extracting {filename}:\n     {error}")
+        return False
+    md_name = f"{stem}_pdf.md"
+    if background_jobs.running:
+        print(f"  -> Saved '{md_name}'")
+    if file_updated_at:
+        for path in {os.path.join(folder_path, md_name), pdf_path}:
+            if path != source_path and os.path.exists(path):
+                set_file_mtime(path, file_updated_at)
+    return True
+
+
+def queue_extraction(
+    source_path: str,
+    folder_path: str,
+    file_updated_at: Optional[str] = None,
+    on_result=None,
+) -> None:
+    """Run ``extract_document`` on the background PDF worker."""
+
+    def job():
+        result = extract_document(source_path, folder_path, file_updated_at)
+        if on_result:
+            on_result(result)
+
+    background_jobs.submit(PDF, job, key=(PDF, source_path))
 
 
 def download_embedded_media(
@@ -330,6 +482,7 @@ def process_canvas_file(
     if file_id in processed_canvas_file_ids:
         source_path = processed_canvas_file_ids[file_id]
         dest_path = os.path.join(folder_path, filename)
+        copied = 0
         if (
             source_path != dest_path
             and os.path.exists(source_path)
@@ -340,10 +493,17 @@ def process_canvas_file(
                 print(f"Copied '{filename}' to '{folder_path}'")
                 if summary and course_name and dest_label:
                     summary.add_file(course_name, dest_label, filename, "copied")
-                return 1
+                copied = 1
             except Exception as e:
                 print(f"Could not copy file '{filename}': {e}")
-        return 0
+        # The same video embedded in several places is transcribed once, then copied.
+        if (
+            source_path != dest_path
+            and is_media_file(filename)
+            and os.path.exists(dest_path)
+        ):
+            queue_transcript_copy(source_path, dest_path)
+        return copied
 
     processed_canvas_file_ids[file_id] = os.path.join(folder_path, filename)
 
@@ -356,33 +516,33 @@ def process_canvas_file(
     md_name = f"{os.path.splitext(filename)[0]}_pdf.md" if has_extractable else None
     md_path = os.path.join(folder_path, md_name) if md_name else None
 
+    file_path = os.path.join(folder_path, filename)
+
+    def record(action: str, name: str = filename) -> None:
+        if summary and course_name and dest_label:
+            summary.add_file(course_name, dest_label, name, action)
+
     # Check if file has changed
     if not has_file_changed(existing_metadata, canvas_updated_at=file_updated_at):
-        if has_extractable and opendataloader_pdf and not os.path.exists(md_path):
-            source_local_path = os.path.join(folder_path, filename)
+        if (
+            has_extractable
+            and opendataloader_pdf
+            and not os.path.exists(md_path)
             # Ensure the source file actually exists locally before trying to extract
-            if os.path.exists(source_local_path):
-                print(f"Generating missing Markdown for '{filename}'...")
-                if is_pdf:
-                    extraction_success, extraction_error = extract_pdf_with_diagnostics(
-                        source_local_path, folder_path
+            and os.path.exists(file_path)
+        ):
+            print(f"Generating missing Markdown for '{filename}'...")
+            queue_extraction(file_path, folder_path, file_updated_at)
+        if needs_transcript(file_path):
+
+            def record_transcript(ok: Optional[bool]) -> None:
+                if ok is not None:
+                    record(
+                        "transcribed" if ok else "transcription failed",
+                        transcript_name(filename),
                     )
-                else:
-                    # Office file: convert to PDF first, then extract
-                    conv_success, conv_pdf_path, conv_error = convert_office_to_pdf(
-                        source_local_path, folder_path
-                    )
-                    if conv_success:
-                        extraction_success, extraction_error = extract_pdf_with_diagnostics(
-                            conv_pdf_path, folder_path
-                        )
-                    else:
-                        extraction_success = False
-                        extraction_error = conv_error
-                if not extraction_success:
-                    print(f"  -> Error extracting {filename}:\n     {extraction_error}")
-                elif file_updated_at and os.path.exists(md_path):
-                    set_file_mtime(md_path, file_updated_at)
+
+            queue_transcription(file_path, file_updated_at, on_result=record_transcript)
         return 0  # No change to the Canvas file itself
     print(f"{'Updating' if existing_metadata else 'New'} file found: '{filename}'")
     local_filepath = os.path.join(DOWNLOAD_DIR, filename)
@@ -392,72 +552,32 @@ def process_canvas_file(
         success = save_file_locally(local_filepath, filename, folder_path)
 
         if success:
-            extraction_failed = False
-            if is_pdf and opendataloader_pdf:
-                pdf_path = os.path.join(folder_path, filename)
-                print(f"Extracting '{filename}' using Hybrid Mode...")
-
-                extraction_success, extraction_error = extract_pdf_with_diagnostics(
-                    pdf_path, folder_path
+            if file_updated_at and os.path.exists(file_path):
+                set_file_mtime(file_path, file_updated_at)
+            # One summary entry per file, recorded once its extraction or
+            # transcription (which may run in the background) has finished.
+            base_action = "updated" if existing_metadata else "created"
+            if has_extractable and opendataloader_pdf:
+                # A failed extraction doesn't stop the sync: the file itself is saved.
+                queue_extraction(
+                    file_path,
+                    folder_path,
+                    file_updated_at,
+                    on_result=lambda ok: record(
+                        base_action if ok else f"{base_action} (extraction failed)"
+                    ),
                 )
-
-                if not extraction_success:
-                    extraction_failed = True
-                    print(f"  -> Error extracting {filename}:")
-                    print(f"     {extraction_error}")
-                    # Continue syncing despite extraction failure —
-                    # the PDF itself is already saved to local storage.
-
-            elif is_office and opendataloader_pdf:
-                office_path = os.path.join(folder_path, filename)
-                print(f"Converting '{filename}' to PDF...")
-                conv_success, conv_pdf_path, conv_error = convert_office_to_pdf(
-                    office_path, folder_path
+            elif is_media_file(filename) and can_transcribe():
+                # New or changed video: (re)transcribe, replacing any stale transcript.
+                queue_transcription(
+                    file_path,
+                    file_updated_at,
+                    on_result=lambda ok: record(
+                        f"{base_action} (transcription failed)" if ok is False else base_action
+                    ),
                 )
-                if conv_success:
-                    print(f"Extracting converted PDF using Hybrid Mode...")
-                    extraction_success, extraction_error = extract_pdf_with_diagnostics(
-                        conv_pdf_path, folder_path
-                    )
-                    if not extraction_success:
-                        extraction_failed = True
-                        print(f"  -> Error extracting converted PDF from {filename}:")
-                        print(f"     {extraction_error}")
-                else:
-                    extraction_failed = True
-                    print(f"  -> Error converting {filename} to PDF:")
-                    print(f"     {conv_error}")
-
-            if file_updated_at:
-                target_path = os.path.join(folder_path, filename)
-                if os.path.exists(target_path):
-                    set_file_mtime(target_path, file_updated_at)
-                if has_extractable:
-                    md_name = f"{os.path.splitext(filename)[0]}_pdf.md"
-                    md_path = os.path.join(folder_path, md_name)
-                    if os.path.exists(md_path):
-                        set_file_mtime(md_path, file_updated_at)
-                if is_office:
-                    generated_pdf = os.path.join(
-                        folder_path, f"{os.path.splitext(filename)[0]}.pdf"
-                    )
-                    if os.path.exists(generated_pdf):
-                        set_file_mtime(generated_pdf, file_updated_at)
-
-            # Record a single summary entry per file
-            if summary and course_name and dest_label:
-                base_action = "updated" if existing_metadata else "created"
-                action = (
-                    f"{base_action} (extraction failed)"
-                    if extraction_failed
-                    else base_action
-                )
-                summary.add_file(
-                    course_name,
-                    dest_label,
-                    filename,
-                    action,
-                )
+            else:
+                record(base_action)
             return 1
         else:
             # If save/upload failed, remove the downloaded file
@@ -2634,6 +2754,11 @@ def main():
     set_embedded_video_downloads(
         _get_bool_config(config, "EXPORTS", "DOWNLOAD_EMBEDDED_VIDEOS", True)
     )
+    configure_transcription(config)
+    # PDF extraction and video transcription run on background workers while
+    # the sync keeps downloading; the run waits for them before the summary.
+    if _get_bool_config(config, "PERFORMANCE", "BACKGROUND_JOBS", True):
+        background_jobs.start()
 
     runtime_export_flags = {
         "EXPORT_QUIZZES": export_quizzes,
@@ -3157,11 +3282,22 @@ def main():
         except Exception as e:
             print(f"Error exporting inbox conversations: {e}")
 
+    still_running = background_jobs.describe_pending()
+    if still_running:
+        print(f"\nCanvas sync done. Waiting for background jobs: {still_running}...")
+        background_jobs.wait()
+    linked = link_new_transcripts()
+    if linked:
+        print(f"Added transcript links to {linked} note(s).")
+
     # Print summary before cleanup
     summary.print_summary()
     failed_extractions = summary.get_action_count_contains("extraction failed")
     if failed_extractions:
         print(f"Extraction failures: {failed_extractions}")
+    failed_transcriptions = summary.get_action_count_contains("transcription failed")
+    if failed_transcriptions:
+        print(f"Transcription failures: {failed_transcriptions}")
     if disabled_endpoints_this_run:
         print("Auto-disabled endpoints this run:")
         for option, status in disabled_endpoints_this_run.items():

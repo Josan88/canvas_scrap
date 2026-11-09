@@ -33,6 +33,10 @@ BACKOFF_FACTOR = 0.5
 CANVAS_PER_PAGE = 100
 # HTTP connection pool size for Canvas requests
 HTTP_POOL_MAXSIZE = 20
+# Extract PDFs and transcribe videos on background workers while the sync keeps
+# downloading (transcription uses the CPU, PDF extraction mostly the GPU, so they overlap).
+# The run waits for them before the summary. false = finish each file before the next.
+BACKGROUND_JOBS = true
 
 [PDF_EXTRACTION]
 # Device for the hybrid PDF server: auto, cpu, cuda, mps, xpu
@@ -72,6 +76,32 @@ EXPORT_SYLLABUS = true
 # (e.g. lecture recordings) → saved next to the note and embedded as ![[video.mp4]].
 # Lecture recordings can be hundreds of MB each. When false, notes keep a link to the Canvas player.
 DOWNLOAD_EMBEDDED_VIDEOS = true
+
+[TRANSCRIPTION]
+# Transcribe downloaded videos with Whisper (faster-whisper) → <video name>_transcript.md
+# next to the video, linked from the note. Needs `pip install faster-whisper` and ffmpeg.
+TRANSCRIBE_VIDEOS = true
+# Whisper model. small.en: ~7x realtime on an 8-10 core laptop CPU (a 2 h lecture in ~16 min).
+# large-v3-turbo: more accurate on hard audio, ~2.5x slower. Others: base.en, medium.en, distil-large-v3.
+MODEL = small.en
+# auto (NVIDIA GPU if present, else CPU), cpu, cuda. AMD/Intel GPUs are not supported; auto uses the CPU.
+DEVICE = auto
+# auto → int8 on CPU, float16 on CUDA. Others: int8_float16, float32
+COMPUTE_TYPE = auto
+# Spoken language code (en, ms, zh, ...), or auto to detect. *.en models are English-only.
+LANGUAGE = en
+# 1 = greedy (fastest). 5 is Whisper's default; slightly more accurate, about half the speed.
+BEAM_SIZE = 1
+# CPU threads; 0 = one per physical core
+CPU_THREADS = 0
+# Speech pieces decoded at once (needs VAD_FILTER). 1 = off. 8 is about 1.5x faster on CPU
+# but less accurate: on a test lecture it dropped words (31% word error rate vs 20% with 1,
+# both against large-v3-turbo), because each piece is transcribed without the text before it.
+BATCH_SIZE = 1
+# Skip silence before transcribing (faster, fewer hallucinated lines)
+VAD_FILTER = true
+# Example text that steers punctuation and spelling; add course terms or names if they come out wrong
+INITIAL_PROMPT = Welcome to today's lecture. Let's get started.
 
 [NOTEBOOKLM]
 # Toggle whether to automatically sync to NotebookLM after Canvas sync completes (true/false)

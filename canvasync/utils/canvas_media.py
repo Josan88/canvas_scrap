@@ -18,6 +18,8 @@ from typing import Dict, List, Optional
 
 from bs4 import BeautifulSoup
 
+from canvasync.utils.transcribe import transcript_link_target, transcript_name
+
 _ATTACHMENT_RE = re.compile(r"/media_attachments(?:_iframe)?/(\d+)")
 _MEDIA_OBJECT_RE = re.compile(r"/media_objects(?:_iframe)?/(m-[A-Za-z0-9]+)")
 _PLAYER_PREFIX_RE = re.compile(r"^(?:video|audio|media) player for\s+", re.IGNORECASE)
@@ -94,8 +96,9 @@ def resolve_media_file_info(key: str, canvas_api_url: str, canvas_headers: dict,
 def needs_media_embed_retry(html_content: Optional[str], md_path: str, file_id_map: Optional[dict] = None) -> bool:
     """True when an existing Markdown file is missing a Canvas video embed found in *html_content*.
 
-    A downloaded video must appear as ``![[name]]``; otherwise the Markdown must at
-    least carry the Canvas player link (which contains the embed key).
+    A downloaded video must appear as ``![[name]]`` (plus a link to its transcript
+    once one exists); otherwise the Markdown must at least carry the Canvas player
+    link (which contains the embed key).
     """
     if not html_content or not md_path or not os.path.exists(md_path):
         return False
@@ -113,6 +116,57 @@ def needs_media_embed_retry(html_content: Optional[str], md_path: str, file_id_m
         if name and os.path.exists(os.path.join(folder, name)):
             if f"![[{name}]]" not in text:
                 return True
+            if os.path.exists(os.path.join(folder, transcript_name(name))) and (
+                f"[[{transcript_link_target(name)}]]" not in text
+            ):
+                return True
         elif embed["key"] not in text:
             return True
     return False
+
+
+def add_transcript_links(media_path: str) -> int:
+    """Add a ``Transcript:`` link under each ``![[video]]`` embed of *media_path* in its folder's notes.
+
+    Used when a transcript finishes after the notes embedding the video were
+    written. The result matches what ``html_to_obsidian`` writes when the
+    transcript already exists. Each note keeps its modification time, which the
+    sync compares with Canvas' ``updated_at``. Returns the number of notes changed.
+    """
+    folder = os.path.dirname(media_path)
+    name = os.path.basename(media_path)
+    transcript_file = transcript_name(name)
+    if not os.path.exists(os.path.join(folder, transcript_file)):
+        return 0
+    target = f"[[{transcript_link_target(name)}]]"
+    link = f"Transcript: {target}"
+    embed_re = re.compile(rf"({re.escape(f'![[{name}]]')})[ \t]*(\r?\n|$)")
+    changed = 0
+    try:
+        entries = os.listdir(folder)
+    except OSError:
+        return 0
+    for entry in entries:
+        if not entry.lower().endswith(".md") or entry == transcript_file:
+            continue
+        path = os.path.join(folder, entry)
+        try:
+            with open(path, "r", encoding="utf-8", newline="") as f:
+                text = f.read()
+        except (OSError, UnicodeDecodeError):
+            continue
+        if f"![[{name}]]" not in text or target in text:
+            continue
+        newline = "\r\n" if "\r\n" in text else "\n"
+        patched = embed_re.sub(lambda m: f"{m.group(1)}  {newline}{link}{m.group(2)}", text)
+        if patched == text:
+            continue
+        try:
+            stat = os.stat(path)
+            with open(path, "w", encoding="utf-8", newline="") as f:
+                f.write(patched)
+            os.utime(path, (stat.st_atime, stat.st_mtime))
+            changed += 1
+        except OSError as e:
+            print(f"Could not add transcript link to '{entry}': {e}")
+    return changed

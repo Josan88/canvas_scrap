@@ -14,6 +14,7 @@ This project pulls course content (assignments, pages, files, discussions, and o
 - Announcement export to Markdown, including linked and attached files, plus announcements JSON
 - Linked file discovery from assignments/pages/discussions (`/files/{id}` links)
 - Embedded Canvas video download (lecture recordings in the Canvas media player): saved next to the note and embedded with `![[video.mp4]]`, plus a link back to the Canvas player
+- Video transcription: downloaded videos are transcribed locally with Whisper (`faster-whisper`) to `<video name>_transcript.md` with timestamped paragraphs, linked from the note under the video
 - PDF handling:
   - Saves original PDF files
   - Extracts PDF content to `*_pdf.md` using `opendataloader_pdf`
@@ -29,6 +30,7 @@ This project pulls course content (assignments, pages, files, discussions, and o
 
 - Python 3.10+
 - Java 11+ (required at runtime for PDF extraction flow)
+- ffmpeg on `PATH` (used to read audio for video transcription)
 - Canvas API token with access to the courses you want to sync
 
 If Java is missing, the app exits before sync starts.
@@ -74,6 +76,7 @@ Configure `config.ini`.
 - `BACKOFF_FACTOR` (default `0.5`)
 - `CANVAS_PER_PAGE` (default `100`)
 - `HTTP_POOL_MAXSIZE` (default `20`)
+- `BACKGROUND_JOBS` (default `true`): extract PDFs and transcribe videos on two background workers while the sync keeps downloading, then wait for them before the summary. Transcription runs on the CPU and PDF extraction mostly in the hybrid server (on the GPU when there is one), so they overlap. Their progress lines are interleaved with the sync's output. `false` does each file's extraction or transcription before moving on
 
 ### `[EXPORTS]`
 
@@ -90,6 +93,21 @@ Toggle optional exports with `true/false`:
 - `EXPORT_SUBMISSIONS_SUMMARY` (default `false`)
 - `EXPORT_INBOX_CONVERSATIONS` (default `false`)
 - `DOWNLOAD_EMBEDDED_VIDEOS` (default `true`): download Canvas-hosted videos embedded in content. Lecture recordings can be hundreds of MB each; when `false`, notes keep a link to the Canvas player instead
+
+### `[TRANSCRIPTION]` (optional)
+
+- `TRANSCRIBE_VIDEOS` (default `true`): transcribe downloaded videos to `<video name>_transcript.md`
+- `MODEL` (default `small.en`): Whisper model. `small.en` runs at about 7x realtime on an 8-10 core laptop CPU (a 2-hour lecture in about 16 minutes); `large-v3-turbo` is more accurate on difficult audio but about 2.5x slower
+- `DEVICE` (default `auto`): `auto`, `cpu` or `cuda`. Only NVIDIA GPUs are supported; `auto` falls back to the CPU
+- `COMPUTE_TYPE` (default `auto`): `int8` on CPU, `float16` on CUDA
+- `LANGUAGE` (default `en`): spoken language code, or `auto` to detect (`*.en` models are English-only)
+- `BEAM_SIZE` (default `1`): `1` is greedy decoding (fastest); `5` is slightly more accurate and about half the speed
+- `CPU_THREADS` (default `0`): `0` uses one thread per physical core
+- `BATCH_SIZE` (default `1`, off): decode this many speech pieces at once (faster-whisper's batched pipeline; needs `VAD_FILTER`). `8` was about 1.5x faster on a 10-core laptop CPU but less accurate: on a test lecture it dropped words, raising the word error rate from 20% to 31% (both measured against `large-v3-turbo`), because each piece is transcribed without the text before it
+- `VAD_FILTER` (default `true`): skip silence before transcribing
+- `INITIAL_PROMPT`: example text that steers punctuation and spelling; add course terms or names that come out wrong
+
+The model is downloaded from Hugging Face on first use (about 500 MB for `small.en`).
 
 If quizzes/analytics/gradebook endpoints return 403/404, the corresponding export can be auto-disabled and persisted to `config.ini`.
 
@@ -126,6 +144,24 @@ Notes:
 - It finds quizzes through the course's assignments, so it works when a course hides its Quizzes page (the reason `EXPORT_QUIZZES` gets auto-disabled).
 - New Quizzes aren't supported: Canvas doesn't give students their New Quiz attempts through the API.
 - Quizzes that need an access code, a lockdown browser or a campus IP address can refuse the request (HTTP 401/403).
+
+## Transcribing Videos Already on Disk
+
+The sync transcribes videos as they are downloaded, and also transcribes previously downloaded videos that have no transcript yet. To work through a backlog without running a full sync:
+
+```powershell
+python transcribe_videos.py
+```
+
+This scans `LOCAL_ROOT_DIR` for videos without a `*_transcript.md`. The same recording embedded in several places is transcribed once and the transcript copied to the other folders. Notes get their `Transcript:` link on the next sync.
+
+Optional arguments:
+
+- `python transcribe_videos.py "path/to/folder or video.mp4"`: only these files or folders
+- `--course "EAT40006"`: only course folders whose name contains this text
+- `--list`: only list what would be transcribed
+- `--force`: re-transcribe videos that already have a transcript
+- `--model large-v3-turbo`: use a different Whisper model for this run
 
 ## NotebookLM Sync Tracking
 
@@ -176,6 +212,8 @@ canvas_sync/
       Announcement Title/
         Announcement Title.md
         linked_file.ext
+        Lecture Recording.mp4
+        Lecture Recording_transcript.md
     Quizzes/
       Quiz Title/
         Quiz Title - attempt 1.md   (from live_quiz.py)
@@ -219,6 +257,8 @@ The sync is designed to avoid unnecessary writes/downloads:
 - Linked files discovered multiple times in one run are deduplicated by Canvas file ID
 - If a PDF is unchanged but its extracted `*_pdf.md` is missing, extraction is attempted
 - If an Office file (docx/pptx/xlsx) is unchanged but its generated PDF or `*_pdf.md` is missing, conversion and extraction are attempted
+- If a video is unchanged but its `*_transcript.md` is missing, it is transcribed; a changed video is re-transcribed
+- A note written before its video's transcript finished (background jobs) gets its `Transcript:` link at the end of the same run; the note's modification time is kept
 
 Run the tool twice in a row to verify unchanged resources are skipped.
 

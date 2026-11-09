@@ -10,6 +10,7 @@ from markdownify import markdownify as md
 
 from canvasync.utils.canvas_media import media_embed_key, media_embed_title
 from canvasync.utils.sanitize import sanitize_filename
+from canvasync.utils.transcribe import transcript_link_target, transcript_name
 from canvasync.utils.youtube import (
     extract_youtube_ids,
     format_youtube_details,
@@ -238,6 +239,13 @@ def html_to_obsidian(html_content: str, file_id_map: dict = None, output_dir: st
         if downloaded:
             replacement.append(soup.new_tag("br"))
             replacement.append(NavigableString(f"![[{filename}]]"))
+            if output_dir and os.path.exists(
+                os.path.join(output_dir, transcript_name(filename))
+            ):
+                replacement.append(soup.new_tag("br"))
+                replacement.append(
+                    NavigableString(f"Transcript: [[{transcript_link_target(filename)}]]")
+                )
         tag.replace_with(replacement)
 
     for anchor in soup.find_all("a", href=True):
